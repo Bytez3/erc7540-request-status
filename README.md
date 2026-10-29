@@ -1,5 +1,7 @@
 # ERC-XXXX: Request Status for ERC-7540 Vaults
 
+[![test](https://github.com/Bytez3/erc7540-request-status/actions/workflows/test.yml/badge.svg)](https://github.com/Bytez3/erc7540-request-status/actions/workflows/test.yml)
+
 Proposed by **[Bytez3](https://www.bytez3.com)** (Steven Isaac, [@SteOnChain](https://github.com/SteOnChain)).
 
 A draft ERC plus a reference implementation. It lets any ERC-7540 async vault report a Request's **state**, **queue position**, and **bounds on when it becomes claimable**.
