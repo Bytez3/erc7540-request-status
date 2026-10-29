@@ -1,0 +1,29 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge fmt --check
+      - run: forge build --sizes
+      - run: forge test -vv
+
+  slither:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: crytic/slither-action@v0.4.1
+        with:
+          target: src/FifoRedeemVault.sol
+          slither-args: --filter-paths "lib/|test/" --exclude-informational
+          fail-on: low

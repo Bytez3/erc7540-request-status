@@ -8,3 +8,8 @@ evm_version = "osaka"
 runs = 1024
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+[invariant]
+runs = 256
+depth = 100
+fail_on_revert = true

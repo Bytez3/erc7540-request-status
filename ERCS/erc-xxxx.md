@@ -331,31 +331,54 @@ The interface is fully backwards compatible with ERC-7540. It adds only `view` m
 
 ## Test Cases
 
-The reference implementation includes a Foundry test suite covering:
+The reference implementation ships with a Foundry test suite of 45 unit and fuzz tests and 8 stateful invariants. The invariants are checked after every step of 256 random sequences of 100 actions each: deposits, Requests, fulfillments, time jumps, claims, yield and suspensions.
 
-- `None` for unknown `requestId` and for a mismatched `controller`.
-- Queue position and bounds for Requests that straddle processing cycles.
+Unit and fuzz tests cover:
+
+- `None` for an unknown `requestId` and for a mismatched `controller`.
+- Queue position and bounds for Requests that span several processing cycles, including capacity left over in a cycle that is already open.
 - `PartiallyClaimable` after a partial fulfillment, and claims attributed oldest-first within a `controller`.
 - Bounds that never fall into the past when the Vault misses a cycle.
-- An open upper bound when throughput is unknown.
-- `Suspended` returning the loosest bounds, plus emission of the Vault-wide event.
-- Precedence of `Impaired` over `Suspended`, and `Claimable` taking precedence over both once `pending == 0`.
+- An open upper bound when throughput is unknown, and `[0, type(uint64).max]` when there is no schedule.
+- `Suspended` returning the loosest bounds, with the Vault-wide event emitted on suspension and on resumption.
+- `Impaired` taking precedence over `Suspended`, and `Claimable` taking precedence over both once `pending == 0`.
 - `redeemDelayBounds` agreeing with `redeemRequestStatus` for a Request made in the same block.
-- A fuzz test of the consistency requirements over arbitrary Request sizes, fulfillment amounts and elapsed time.
+- Status methods costing the same gas for the 2nd and the 202nd Request in the queue.
+- The consistency requirements of this specification, fuzzed over Request sizes, fulfillment amounts and elapsed time.
+
+The invariants assert that:
+
+1. The Vault is solvent: reserved assets never exceed its balance.
+2. Reserved assets equal the sum of every controller's `maxWithdraw`, and no controller is left with assets but zero shares.
+3. Escrowed shares, the queue counters and the sum of per-Request Pending amounts agree.
+4. Per-Request Claimable amounts sum to each controller's `maxRedeem`.
+5. Every consistency requirement in this specification holds for every Request.
+6. **No share is ever fulfilled before an `earliestClaimableAt` the Vault has reported for it.**
+7. No cycle fulfills more than its declared capacity.
+8. `minDelay <= maxDelay`.
+
+To check the suite has teeth, two deliberately broken versions of the Vault were run against it: one with the capacity cap removed, and one with the time estimate shifted by one cycle. The suite caught both: invariants 6 and 7 failed for the first, and invariant 6 failed for the second.
 
 ## Reference Implementation
 
-See [`FifoRedeemVault.sol`](../assets/erc-xxxx/src/FifoRedeemVault.sol). It is an ERC-7540 Vault with synchronous deposits and a strictly FIFO redemption queue, which a manager processes in fixed cycles with a declared per-cycle capacity.
+See [`FifoRedeemVault.sol`](../assets/erc-xxxx/src/FifoRedeemVault.sol). It is an ERC-7540 Vault with synchronous deposits and a strictly first-in-first-out redemption queue. A manager processes the queue in cycles of at least `cycleLength` seconds, each fulfilling at most `capacityPerCycle` shares.
 
-The queue is represented by two cumulative counters. Each Request occupies the half-open interval `[start, start + shares)` of all shares ever queued, and `totalProcessed` is the fulfilled prefix of that line. A Request's Pending amount, its `queuedAhead`, and the cycles in which its first and last shares will be fulfilled then follow arithmetically, so every status method runs in constant gas regardless of queue length:
+The queue is represented by two cumulative counters. Each Request occupies the half-open interval `[start, start + shares)` of all shares ever queued, and `totalProcessed` is the fulfilled prefix of that line. A Request's Pending amount, its `queuedAhead` and its bounds therefore follow arithmetically, and every status method runs in constant gas however long the queue is. For the share at queue offset `x`:
 
 ```solidity
-queuedAhead          = max(start - totalProcessed, 0);
-earliestClaimableAt  = nextCycle + (queuedAhead / capacity) * cycleLength;
-latestClaimableAt    = nextCycle + ((queuedAhead + pending - 1) / capacity) * cycleLength;
+fillTime(x) = x < availableNow
+    ? block.timestamp
+    : nextOpen + ((x - availableNow) / capacityPerCycle) * cycleLength;
+
+earliestClaimableAt = fillTime(queuedAhead);
+latestClaimableAt   = fillTime(queuedAhead + pending - 1);
 ```
 
-where `nextCycle = max(nextCycleAt, block.timestamp)`. When capacity is unknown, `latestClaimableAt` is `type(uint64).max`. When the Vault is suspended, the bounds are `[0, type(uint64).max]`.
+Here `availableNow` is the capacity still usable without waiting: the full capacity if a new cycle can open now, or what is left of the open cycle. `nextOpen` is the earliest time the next full cycle can open.
+
+The Vault **enforces** this schedule rather than only reporting it. Fulfillment reverts outside a cycle, and a cycle's total is capped at its capacity. So until the manager changes the schedule, `earliestClaimableAt` is a guarantee, while `latestClaimableAt` is met whenever the manager fulfills every cycle in full and on time. This shows how a Vault can make its bounds enforceable, which matters to consumers that rely on them for value (see Security Considerations).
+
+Each batch is fulfilled at a single exchange rate, read once, and each fulfillment touches at most `maxRequests` Requests (see [Gas](#gas)). Claiming a controller's last Claimable share pays out its remaining Claimable assets, and a `withdraw` that would use up every share while leaving assets behind reverts. Either way, no dust is stranded.
 
 ## Security Considerations
 
@@ -378,6 +401,8 @@ Moving to `Impaired` signals a loss before it is realized. Holders who can still
 ### Gas
 
 The status methods are `view` and are expected to be called off-chain, but they may also be called on-chain by lending or routing contracts. Implementations SHOULD keep them constant-gas. The reference implementation shows that a FIFO queue does not need iteration to answer them.
+
+Any queue that is fulfilled by iterating over Requests can be griefed by an attacker who submits many tiny Requests until fulfillment exceeds the block gas limit, freezing the queue and making every reported bound unreachable. Vaults SHOULD bound the work done per fulfillment call, for example with a maximum number of Requests per call as in the reference implementation, or SHOULD enforce a minimum Request size.
 
 ## Copyright
 

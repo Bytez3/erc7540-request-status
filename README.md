@@ -9,8 +9,9 @@ A draft ERC plus a reference implementation. It lets any ERC-7540 async vault re
 | `ERCS/erc-xxxx.md` | The spec, in ethereum/ERCs format. Passes the repo's `eipw` linter. |
 | `src/interfaces/IERC7540RequestStatus.sol` | The proposed interfaces (redeem + deposit). |
 | `src/interfaces/IERC7540.sol` | The minimal ERC-7540 interfaces it builds on. |
-| `src/FifoRedeemVault.sol` | Reference implementation: a FIFO redemption queue with O(1) status views. Not audited. |
-| `test/FifoRedeemVault.t.sol` | 15 Foundry tests, including a consistency fuzz test. |
+| `src/FifoRedeemVault.sol` | Reference implementation: a FIFO redemption queue with O(1) status views and an enforced processing schedule. Not audited. |
+| `test/FifoRedeemVault.t.sol` | 45 unit and fuzz tests. |
+| `test/invariant/` | 8 stateful invariants, including "no share is paid before its reported earliest time". |
 | `MAGICIANS_POST.md` | Draft discussion post for ethereum-magicians.org. |
 
 Interface IDs: `IERC7540RedeemStatus` = `0x2522a9c4`, `IERC7540DepositStatus` = `0x27f6ce85`.
@@ -24,6 +25,14 @@ forge test -vv
 ```
 
 This needs `evm_version = "osaka"`, because OpenZeppelin v5.7 uses the `CLZ` opcode.
+
+Static analysis (Slither reports 0 findings; the three intentional patterns are annotated in the source):
+
+```bash
+slither src/FifoRedeemVault.sol --filter-paths "lib/|test/" --exclude-informational
+```
+
+CI runs formatting, build, the full test suite and Slither on every push.
 
 ## Path to an ERC number
 
