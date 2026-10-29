@@ -22,8 +22,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: crytic/slither-action@v0.4.1
+      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: actions/setup-python@v5
         with:
-          target: src/FifoRedeemVault.sol
-          slither-args: --filter-paths "lib/|test/" --exclude-informational
-          fail-on: low
+          python-version: "3.12"
+      - run: pip install slither-analyzer
+      - run: slither src/FifoRedeemVault.sol --filter-paths "lib/|test/" --exclude-informational --fail-low
