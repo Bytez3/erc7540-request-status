@@ -12,6 +12,8 @@ jobs:
         with:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
       - run: forge fmt --check
       - name: forge lint (no findings in our code)
         run: |
@@ -27,6 +29,8 @@ jobs:
         with:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
