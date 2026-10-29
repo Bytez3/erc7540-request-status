@@ -43,7 +43,7 @@ cooldownDuration()            selector 0x35269315
 | Network | WithdrawalQueueERC721 (proxy) | Implementation | Status |
 |---|---|---|---|
 | Ethereum mainnet | `0x889edC2eDab5f40e902b864aD4d7AdE8E412F9B1` | `0xE42C659Dc09109566720EA8b2De186c2Be7D94D9` (EIP-1967 slot read live) | Live. `LidoLocator.withdrawalQueue()` returns this address |
-| Hoodi (560048) | `0xfe56573178f1bcdf53F01A6E9977670dcBBD9186` | `0xd0a60e52837e045f4567193cf8921191c486ecd5` (live slot read; docs table lists `0x83BCE68B...` elsewhere, so check before relying on it) | **Primary, active Lido testnet** per docs. Live: lastRequestId=5478, lastFinalized=5476, not paused. Hoodi `LidoLocator` `0xe2EF9536DAAAEBFf5b1c130957AB3E80056b06D8` -> `withdrawalQueue()` returns this address |
+| Hoodi (560048) | `0xfe56573178f1bcdf53F01A6E9977670dcBBD9186` | `0xd0a60e52837e045f4567193cf8921191c486ecd5` (live EIP-1967 slot read; differs from mainnet impl) | **Primary, active Lido testnet** per docs. Live: lastRequestId=5478, lastFinalized=5476, not paused. Hoodi `LidoLocator` `0xe2EF9536DAAAEBFf5b1c130957AB3E80056b06D8` -> `withdrawalQueue()` returns this address |
 | Sepolia | `0x1583C7b3f4C3B008720E6BcE5726336b0aB25fdd` | n/a | Docs say **"fully deprecated"**. Live: lastRequestId=0, `isPaused()=true`. Not usable |
 | Holesky | `0xc7cc160b58F8Bb0baC94b80847E2CF2800565C50` | n/a | Docs say **"fully deprecated"** |
 
@@ -96,7 +96,7 @@ interface ILidoWithdrawalQueueERC721 {
     function isBunkerModeActive() external view returns (bool);
     function bunkerModeSinceTimestamp() external view returns (uint256);   // type(uint256).max when bunker is off
     function STETH() external view returns (address);
-    function WSTETH() external view returns (address);                     // [UNVERIFIED getter name; immutable present in source]
+    function WSTETH() external view returns (address);                     // public immutable; live 0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0
     function MIN_STETH_WITHDRAWAL_AMOUNT() external view returns (uint256); // live: 100
     function MAX_STETH_WITHDRAWAL_AMOUNT() external view returns (uint256); // live: 1000e18
     function getContractVersion() external view returns (uint256);
@@ -168,7 +168,7 @@ interface IBaseOracle { // AccountingOracle
     function getConsensusContract() external view returns (address);
     function getLastProcessingRefSlot() external view returns (uint256);
     function getConsensusReport() external view returns (bytes32 hash, uint256 refSlot, uint256 processingDeadlineTime, bool processingStarted);
-        // [UNVERIFIED] 4th return name/type; only the first 3 were read from source
+        // live: (0x1b466b9e..., 15537599, 1793361611, true)
     function SECONDS_PER_SLOT() external view returns (uint256); // live 12
     function GENESIS_TIME() external view returns (uint256);     // live 1606824023
 }
@@ -390,7 +390,6 @@ The Centrifuge testnet vault list comes from the testnet indexer `https://api-v3
 ## 5. Open items / not verified
 - Etherscan pages weren't fetched directly because the API needs a key. Verification relied on Blockscout, which mirrors Etherscan/Sourcify.
 - Not byte-diffed against GitHub: Lido HashConsensus/AccountingOracle deployed source, Ethena (vs `code4arena-contest`), Lagoon. Lido WithdrawalQueue sources **were** diffed and are identical.
-- `IBaseOracle.getConsensusReport` 4th return value and the `WSTETH()` getter name on the WQ are unconfirmed. An adapter doesn't need them.
-- The Hoodi WQ implementation address from a live slot read (`0xd0a60e52…`) differs from the address in one docs table row (`0x83BCE68B…`). Check before relying on it; the proxy address is confirmed either way.
+- `0x83BCE68B4e8b7071b2a664a26e6D3Bc17eEe3102` in the Hoodi docs is the WQ **pauser** (CircuitBreaker table), not the implementation.
 - No official Ethena sUSDe testnet deployment was found.
 - No live Centrifuge controller with a non-zero pending redeem was found to use as a fixture.

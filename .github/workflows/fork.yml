@@ -1,0 +1,20 @@
+name: mainnet-fork
+
+# Runs the adapters against live Ethereum mainnet state. Kept separate from the main test workflow because it
+# depends on a public RPC and on live queue contents.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  fork:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge test --match-path "test/fork/*" -vv
+        env:
+          MAINNET_RPC_URL: https://ethereum-rpc.publicnode.com
