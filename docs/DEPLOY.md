@@ -31,11 +31,18 @@ cast balance $(cast wallet address --account bytez3-deployer) --rpc-url https://
 
 ## 3. Deploy to Sepolia
 
+If the keystore was created with a password file next to it (`~/.foundry/keystores/bytez3-deployer.password`),
+add `--password-file` so nothing has to be typed. Otherwise drop that flag and Foundry will prompt.
+
 ```bash
 export SEPOLIA_RPC=https://ethereum-sepolia-rpc.publicnode.com
-forge script script/DeployLens.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --broadcast --verify --verifier sourcify
-forge script script/DeployDemo.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --broadcast --verify --verifier sourcify
+export PW=~/.foundry/keystores/bytez3-deployer.password
+forge script script/DeployLens.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --password-file $PW --broadcast --verify --verifier sourcify
+forge script script/DeployDemo.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --password-file $PW --broadcast --verify --verifier sourcify
 ```
+
+Both scripts check after deploying that your wallet owns what they deployed, and abort otherwise. A rehearsal of
+these exact commands on a Sepolia fork (2026-10-29) cost about 0.0004 ETH in total.
 
 `--verifier sourcify` publishes the verified source code without needing an API key. To verify on Etherscan
 instead, create a free key at etherscan.io and use `--verify --etherscan-api-key <key>`.
