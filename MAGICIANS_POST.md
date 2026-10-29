@@ -50,11 +50,11 @@ Other points:
 - It adds view functions and an event only, with no changes to request, fulfillment or claim behavior.
 
 **Draft spec:** https://github.com/Bytez3/erc7540-request-status/blob/main/ERCS/erc-xxxx.md
-**Reference implementation:** a FIFO redemption-queue vault where every status view is O(1) gas, using cumulative queue counters with no iteration. It has 15 Foundry tests, including a fuzz test of the consistency rules. https://github.com/Bytez3/erc7540-request-status
+**Reference implementation:** a FIFO redemption-queue vault where every status view is O(1) gas, using cumulative queue counters with no iteration. It *enforces* its schedule, so its `earliestClaimableAt` is a guarantee rather than an estimate. It has 45 unit/fuzz tests and 8 stateful invariants, including "no share is ever paid before the earliest time the vault reported", and Slither reports no findings. https://github.com/Bytez3/erc7540-request-status
 
 ### Open questions
 
-1. **Bounds vs. confidence:** should there be an optional flag that says a bound is *enforced* on-chain (for example a hard-coded unbonding period) rather than operator-reported? Lenders would care about the difference.
+1. **Bounds vs. confidence:** should there be an optional flag that says a bound is *enforced* on-chain rather than operator-reported? The reference vault enforces its earliest bound, and lenders would care about the difference.
 2. **Should `Impaired` carry a magnitude**, such as an expected recovery ratio in basis points, or is a state flag enough for a first version?
 3. **`requestId == 0` vaults:** is it acceptable to report the controller's aggregate Pending amount as a single position, or do people want per-deposit granularity?
 4. **Naming:** `RequestStatus` vs. `RequestSchedule` vs. `QueueInfo`?

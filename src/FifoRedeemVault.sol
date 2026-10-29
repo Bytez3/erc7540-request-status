@@ -17,6 +17,11 @@ import {IERC7540RedeemStatus, RequestState} from "./interfaces/IERC7540RequestSt
 /// @notice Reference implementation of ERC-XXXX on an ERC-7540 Vault with synchronous deposits and an
 /// asynchronous, strictly first-in-first-out redemption queue processed by a manager in fixed cycles.
 ///
+/// The schedule is enforced, not just reported: shares are only fulfilled inside a processing cycle,
+/// cycles open at least `cycleLength` apart, and each cycle fulfills at most `capacityPerCycle` shares.
+/// So, until the manager calls `setSchedule`, `earliestClaimableAt` is a guarantee, while
+/// `latestClaimableAt` is the manager's commitment if it fulfills every cycle in full and on time.
+///
 /// Queue accounting uses two cumulative share counters, so every status view is O(1):
 ///   - each Request occupies the half-open interval [start, start + shares) of `totalQueued`
 ///   - `totalProcessed` is the prefix of that line that has been fulfilled
@@ -24,6 +29,7 @@ import {IERC7540RedeemStatus, RequestState} from "./interfaces/IERC7540RequestSt
 /// requested shares lets claims (which ERC-7540 aggregates per controller) be attributed oldest-first.
 ///
 /// @dev Not audited. Intended to demonstrate the standard, not for production use.
+// slither-disable-start timestamp (the processing schedule is defined in wall-clock time by design)
 contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStatus, IERC165 {
     using SafeERC20 for IERC20;
     using Math for uint256;
@@ -52,15 +58,22 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
     // Schedule the estimates are derived from. Set by the manager.
     uint64 public cycleLength; // seconds between processing cycles
     uint64 public nextCycleAt; // timestamp of the next processing cycle
-    uint256 public capacityPerCycle; // shares the manager expects to fulfill per cycle, 0 = unknown
+    uint256 public capacityPerCycle; // maximum shares fulfilled per cycle, 0 = uncapped (throughput unknown)
+    bool public cycleOpen; // a cycle has been opened and `nextCycleAt` has not been reached yet
+    uint256 public fulfilledInCycle; // shares fulfilled in the open cycle
     bool public suspended;
     bool public impaired;
+
+    event ScheduleSet(uint64 cycleLength, uint64 nextCycleAt, uint256 capacityPerCycle);
+    event RedeemFulfilled(uint256 shares, uint256 assets, uint256 totalProcessed);
 
     error NotAuthorized();
     error ZeroShares();
     error ExceedsClaimable();
     error IsSuspended();
     error AsyncFlow();
+    error CycleNotOpen();
+    error StrandedAssets();
 
     constructor(IERC20 asset_, string memory name_, string memory symbol_, address manager)
         ERC20(name_, symbol_)
@@ -83,7 +96,11 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
         if (msg.sender != owner && !isOperator[owner][msg.sender]) _spendAllowance(owner, msg.sender, shares);
         _transfer(owner, address(this), shares);
 
-        _requests.push(Request(controller, shares, totalQueued, requestedBy[controller]));
+        _requests.push(
+            Request({
+                controller: controller, shares: shares, start: totalQueued, controllerStart: requestedBy[controller]
+            })
+        );
         totalQueued += shares;
         requestedBy[controller] += shares;
         requestId = _requests.length;
@@ -109,7 +126,9 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
         _checkController(controller);
         uint256 cs = _claimableShares[controller];
         if (shares > cs) revert ExceedsClaimable();
-        assets = shares.mulDiv(_claimableAssets[controller], cs, Math.Rounding.Floor);
+        if (shares == 0) return 0;
+        // Claiming the last share takes the last asset, so no dust is ever left behind.
+        assets = shares == cs ? _claimableAssets[controller] : shares.mulDiv(_claimableAssets[controller], cs);
         _claim(controller, receiver, shares, assets);
     }
 
@@ -118,7 +137,11 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
         _checkController(controller);
         uint256 ca = _claimableAssets[controller];
         if (assets > ca) revert ExceedsClaimable();
-        shares = assets.mulDiv(_claimableShares[controller], ca, Math.Rounding.Ceil);
+        if (assets == 0) return 0;
+        uint256 cs = _claimableShares[controller];
+        shares = assets == ca ? cs : assets.mulDiv(cs, ca, Math.Rounding.Ceil);
+        // Rounding up must not consume every share while assets remain, which would strand them.
+        if (shares == cs && assets != ca) revert StrandedAssets();
         _claim(controller, receiver, shares, assets);
     }
 
@@ -179,6 +202,7 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
         (uint64 earliest, uint64 latest) = _estimate(totalQueued - totalProcessed, shares == 0 ? 1 : shares);
         uint64 nowTs = uint64(block.timestamp);
         minDelay = earliest > nowTs ? earliest - nowTs : 0;
+        // slither-disable-next-line incorrect-equality (type(uint64).max is the "unknown" sentinel)
         maxDelay = latest == type(uint64).max ? type(uint64).max : latest - nowTs;
     }
 
@@ -192,19 +216,38 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
     // Manager
     // ---------------------------------------------------------------------------------------------
 
-    /// @notice Fulfills up to `shares` from the head of the queue at the current exchange rate.
-    function fulfillRedeem(uint256 shares) external onlyOwner returns (uint256 fulfilled) {
+    /// @notice Fulfills up to `shares` from the head of the queue at the current exchange rate, touching at
+    /// most `maxRequests` Requests so that a queue of many tiny Requests cannot exhaust the block gas limit.
+    /// @dev Opens a new cycle if `nextCycleAt` has passed; otherwise continues the open cycle. A cycle can be
+    /// worked through in several calls, but never beyond `capacityPerCycle` in total.
+    function fulfillRedeem(uint256 shares, uint256 maxRequests) external onlyOwner returns (uint256 fulfilled) {
         if (suspended) revert IsSuspended();
-        uint256 remaining = Math.min(shares, totalQueued - totalProcessed);
 
-        while (remaining > 0) {
+        uint256 limit = totalQueued - totalProcessed;
+        if (cycleLength > 0) {
+            if (block.timestamp >= nextCycleAt) {
+                cycleOpen = true;
+                fulfilledInCycle = 0;
+                nextCycleAt = uint64(block.timestamp) + cycleLength;
+            } else if (!cycleOpen) {
+                revert CycleNotOpen();
+            }
+            if (capacityPerCycle > 0) limit = Math.min(limit, _capacityLeft());
+        }
+
+        // One exchange rate for the whole batch (ERC-4626 virtual-offset formula), read once.
+        uint256 rateAssets = totalAssets() + 1;
+        uint256 rateShares = totalSupply() + 10 ** _decimalsOffset();
+
+        uint256 remaining = Math.min(shares, limit);
+        uint256 totalAssetsOut = 0;
+        for (uint256 n; remaining > 0 && n < maxRequests; n++) {
             Request storage r = _requests[_head];
             uint256 left = r.start + r.shares - totalProcessed;
             uint256 take = Math.min(left, remaining);
 
-            uint256 assets = _convertToAssets(take, Math.Rounding.Floor);
-            _burn(address(this), take);
-            reservedAssets += assets;
+            uint256 assets = take.mulDiv(rateAssets, rateShares);
+            totalAssetsOut += assets;
             _claimableShares[r.controller] += take;
             _claimableAssets[r.controller] += assets;
 
@@ -214,8 +257,11 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
             if (take == left) _head++;
         }
 
-        if (nextCycleAt <= block.timestamp && cycleLength > 0) {
-            nextCycleAt = uint64(block.timestamp) + cycleLength;
+        if (fulfilled > 0) {
+            _burn(address(this), fulfilled);
+            reservedAssets += totalAssetsOut;
+            fulfilledInCycle += fulfilled;
+            emit RedeemFulfilled(fulfilled, totalAssetsOut, totalProcessed);
         }
     }
 
@@ -223,6 +269,9 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
         cycleLength = cycleLength_;
         nextCycleAt = nextCycleAt_;
         capacityPerCycle = capacityPerCycle_;
+        cycleOpen = false; // a new schedule starts with a fresh cycle
+        fulfilledInCycle = 0;
+        emit ScheduleSet(cycleLength_, nextCycleAt_, capacityPerCycle_);
         _emitVaultWide();
     }
 
@@ -240,18 +289,35 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
     // Internal
     // ---------------------------------------------------------------------------------------------
 
-    /// @dev Cycle-based bounds. Unknown values degrade to the loosest true bound (0 / type(uint64).max).
+    /// @dev Bounds for the shares at queue offsets [ahead, ahead + pending), counted from the head of the queue.
+    /// Unknown values degrade to the loosest true bound (0 / type(uint64).max).
     function _estimate(uint256 ahead, uint256 pending) internal view returns (uint64 earliest, uint64 latest) {
         if (suspended || cycleLength == 0) return (0, type(uint64).max);
+        latest = capacityPerCycle == 0 ? type(uint64).max : _toU64(_fillTime(ahead + pending - 1));
+        earliest = _toU64(_fillTime(ahead));
+    }
 
-        // An overdue cycle can run at any moment, so the next cycle is never earlier than now.
-        uint256 next = Math.max(nextCycleAt, block.timestamp);
-        if (capacityPerCycle == 0) return (_toU64(next), type(uint64).max);
+    /// @dev Earliest time the share at queue offset `x` can be fulfilled under the enforced schedule, which is
+    /// also when it will be fulfilled if every cycle runs on time at full capacity.
+    function _fillTime(uint256 x) internal view returns (uint256) {
+        bool canOpenNow = block.timestamp >= nextCycleAt;
+        // Shares that could still be fulfilled right now, in the open cycle or one that may open this block.
+        uint256 availableNow = 0;
+        if (canOpenNow) availableNow = capacityPerCycle == 0 ? type(uint256).max : capacityPerCycle;
+        else if (cycleOpen) availableNow = capacityPerCycle == 0 ? type(uint256).max : _capacityLeft();
+        if (x < availableNow) return block.timestamp;
 
-        uint256 firstCycle = ahead / capacityPerCycle;
-        uint256 lastCycle = (ahead + pending - 1) / capacityPerCycle;
-        earliest = _toU64(next + firstCycle * cycleLength);
-        latest = _toU64(next + lastCycle * cycleLength);
+        uint256 nextOpen = canOpenNow ? block.timestamp + cycleLength : nextCycleAt;
+        if (capacityPerCycle == 0) return nextOpen;
+        // Rounding down to a whole cycle is intended.
+        // slither-disable-start divide-before-multiply
+        // forge-lint: disable-next-line(divide-before-multiply)
+        return nextOpen + ((x - availableNow) / capacityPerCycle) * cycleLength;
+        // slither-disable-end divide-before-multiply
+    }
+
+    function _capacityLeft() internal view returns (uint256) {
+        return capacityPerCycle > fulfilledInCycle ? capacityPerCycle - fulfilledInCycle : 0;
     }
 
     function _claim(address controller, address receiver, uint256 shares, uint256 assets) internal {
@@ -284,6 +350,7 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
     }
 
     function _toU64(uint256 x) internal pure returns (uint64) {
+        // forge-lint: disable-next-line(unsafe-typecast) (guarded by the comparison)
         return x >= type(uint64).max ? type(uint64).max : uint64(x);
     }
 
@@ -292,3 +359,4 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
         emit RedeemRequestStatusUpdate(address(0), 0, s, 0, type(uint64).max);
     }
 }
+// slither-disable-end timestamp
