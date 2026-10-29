@@ -18,13 +18,17 @@ import {TestUSD} from "../src/demo/TestUSD.sol";
 ///   DEMO_CAPACITY  shares fulfilled per cycle     (default 2,500e18)
 contract DeployDemo is Script {
     error MainnetNotAllowed();
+    error ManagerCheckFailed(address expected, address actual);
 
     function run() external returns (TestUSD usd, FifoRedeemVault vault) {
         if (block.chainid == 1 || block.chainid == 8453) revert MainnetNotAllowed();
 
         uint64 cycle = uint64(vm.envOr("DEMO_CYCLE", uint256(3600)));
         uint256 capacity = vm.envOr("DEMO_CAPACITY", uint256(2_500e18));
-        address deployer = msg.sender;
+
+        vm.startBroadcast();
+        // The wallet actually broadcasting; inside a script `msg.sender` is not this address.
+        (, address deployer,) = vm.readCallers();
 
         // Demo controllers so the queue shows several independent positions. Nobody holds these keys; they exist
         // only so the tracker has realistic data. The deployer, as owner of the shares, creates every request.
@@ -36,7 +40,6 @@ contract DeployDemo is Script {
         ];
         uint256[6] memory sizes = [uint256(1_200e18), 800e18, 1_500e18, 2_000e18, 600e18, 1_900e18];
 
-        vm.startBroadcast();
         usd = new TestUSD();
         vault = new FifoRedeemVault(IERC20(address(usd)), "Bytez3 Demo Queue Vault", "b3DQV", deployer);
         vault.setSchedule(cycle, uint64(block.timestamp) + cycle, capacity);
@@ -48,6 +51,8 @@ contract DeployDemo is Script {
             vault.requestRedeem(sizes[i], controllers[i % 4], deployer);
         }
         vm.stopBroadcast();
+
+        if (vault.owner() != deployer) revert ManagerCheckFailed(deployer, vault.owner());
 
         console.log("chainid            ", block.chainid);
         console.log("TestUSD            ", address(usd));

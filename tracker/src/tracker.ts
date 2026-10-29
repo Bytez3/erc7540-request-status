@@ -34,17 +34,29 @@ export interface QueueOverview {
 const LOG_CHUNK = 45_000n; // stays under common public-RPC eth_getLogs range limits
 const BATCH = 40;
 
+// One client per chain, so JSON-RPC batching and the log cache are shared across refreshes.
+const clients = new Map<string, PublicClient>();
+
 export function clientFor(chain: ChainDef): PublicClient {
-  return createPublicClient({
+  const key = `${chain.key}|${chain.rpcUrl}`;
+  const existing = clients.get(key);
+  if (existing) return existing;
+  const client = createPublicClient({
     chain: {
       id: chain.id,
       name: chain.name,
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
       rpcUrls: { default: { http: [chain.rpcUrl] } },
     },
-    transport: http(chain.rpcUrl, { retryCount: 2, timeout: 20_000 }),
+    // Concurrent reads are sent as one JSON-RPC batch request instead of one HTTP request each.
+    transport: http(chain.rpcUrl, { retryCount: 2, timeout: 20_000, batch: { batchSize: 50, wait: 16 } }),
   });
+  clients.set(key, client);
+  return client;
 }
+
+/** Request ids already found per (queue, controller), and the last block scanned for them. */
+const logCache = new Map<string, { ids: Set<bigint>; scannedTo: bigint }>();
 
 async function discover(client: PublicClient, chain: ChainDef, q: QueueDef, owner: Address): Promise<bigint[]> {
   switch (q.discovery.kind) {
@@ -60,9 +72,12 @@ async function discover(client: PublicClient, chain: ChainDef, q: QueueDef, owne
         })),
       ];
     case "events": {
+      // Scan only blocks not seen before for this queue and wallet; refreshes then cost one small log query.
+      const cacheKey = `${chain.key}|${q.address}|${owner}`;
+      const cached = logCache.get(cacheKey) ?? { ids: new Set<bigint>(), scannedTo: q.discovery.fromBlock - 1n };
       const latest = await client.getBlockNumber();
-      const ids = new Set<bigint>();
-      for (let from = q.discovery.fromBlock; from <= latest; from += LOG_CHUNK) {
+      const ids = cached.ids;
+      for (let from = cached.scannedTo + 1n; from <= latest; from += LOG_CHUNK) {
         const to = from + LOG_CHUNK - 1n > latest ? latest : from + LOG_CHUNK - 1n;
         const logs = await client.getContractEvents({
           address: q.address,
@@ -73,7 +88,9 @@ async function discover(client: PublicClient, chain: ChainDef, q: QueueDef, owne
           toBlock: to,
         });
         for (const l of logs) if (l.args.requestId !== undefined) ids.add(l.args.requestId);
+        cached.scannedTo = to;
       }
+      logCache.set(cacheKey, cached);
       return [...ids].sort((a, b) => (a < b ? -1 : 1));
     }
   }

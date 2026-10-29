@@ -29,12 +29,17 @@ contract DeployLens is Script {
     uint256 constant LIDO_REQUEST_TIMESTAMP_MARGIN = 7_680; // OracleReportSanityChecker, read live 2026-10-29
     address constant SUSDE = 0x9D39A5DE30e57443BfF2A8307A4256c8797A3497;
 
-    function run() external returns (RequestStatusLens lens) {
-        address owner = vm.envOr("LENS_OWNER", msg.sender);
+    error OwnershipCheckFailed(address expected, address actual);
 
+    function run() external returns (RequestStatusLens lens) {
         vm.startBroadcast();
+        // The wallet actually broadcasting (keystore, ledger or key). Inside a script `msg.sender` is NOT this
+        // address, so it must never be used for ownership.
+        (, address deployer,) = vm.readCallers();
+        address owner = vm.envOr("LENS_OWNER", deployer);
+
         ERC7540Adapter generic = new ERC7540Adapter();
-        lens = new RequestStatusLens(msg.sender, generic);
+        lens = new RequestStatusLens(deployer, generic);
         console.log("chainid                 ", block.chainid);
         console.log("ERC7540Adapter          ", address(generic));
         console.log("RequestStatusLens       ", address(lens));
@@ -52,10 +57,15 @@ contract DeployLens is Script {
             console.log("EthenaCooldownAdapter     ", address(ethena));
         }
 
-        if (owner != msg.sender) {
+        if (owner != deployer) {
             lens.transferOwnership(owner);
             console.log("ownership offered to    ", owner, "(must call acceptOwnership)");
         }
         vm.stopBroadcast();
+
+        // Self-check: abort the run if ownership is not what we intended.
+        if (lens.owner() != deployer) revert OwnershipCheckFailed(deployer, lens.owner());
+        if (owner != deployer && lens.pendingOwner() != owner) revert OwnershipCheckFailed(owner, lens.pendingOwner());
+        console.log("lens owner              ", lens.owner());
     }
 }

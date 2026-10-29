@@ -42,11 +42,38 @@ const esc = (s: string) =>
 // ------------------------------------------------------------------------------------------------
 
 const params = new URLSearchParams(location.search);
+// Development only: point the tracker at a local chain or fork. Remote RPCs are never accepted here.
 const devChain = (() => {
   if (params.get("chain") === "local") return LOCAL_CHAIN;
   const lens = params.get("lens");
-  if (params.get("chain") === "fork" && lens && isAddress(lens)) return { ...FORK_CHAIN, lens: getAddress(lens) };
-  return undefined;
+  if (params.get("chain") !== "fork" || !lens || !isAddress(lens)) return undefined;
+  const rpc = params.get("rpc") ?? FORK_CHAIN.rpcUrl;
+  if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+\/?$/.test(rpc)) return undefined;
+  const vault = params.get("vault");
+  if (vault && isAddress(vault)) {
+    // A fork of a testnet with the demo vault deployed on it.
+    return {
+      ...FORK_CHAIN,
+      id: 11155111,
+      name: "Testnet fork (local)",
+      rpcUrl: rpc,
+      lens: getAddress(lens),
+      explorer: "",
+      queues: [
+        {
+          id: "demo",
+          name: "Bytez3 Demo Queue Vault",
+          address: getAddress(vault),
+          unit: "b3tUSD shares",
+          decimals: 18,
+          discovery: { kind: "events" as const, fromBlock: BigInt(params.get("from") ?? "0") },
+          overview: true,
+          blurb: "Rehearsal of the Sepolia demo on a local fork.",
+        },
+      ],
+    };
+  }
+  return { ...FORK_CHAIN, rpcUrl: rpc, lens: getAddress(lens) };
 })();
 const allChains = devChain ? [devChain, ...CHAINS] : CHAINS;
 let chain: ChainDef =

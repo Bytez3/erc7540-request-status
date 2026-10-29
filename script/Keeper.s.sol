@@ -18,10 +18,16 @@ contract Keeper is Script {
         if (block.chainid == 1 || block.chainid == 8453) revert MainnetNotAllowed();
         FifoRedeemVault vault = FifoRedeemVault(vm.envAddress("DEMO_VAULT"));
 
-        bool cycleReady = block.timestamp >= vault.nextCycleAt() || vault.cycleOpen();
+        // Only send a fulfillment when it can actually pay something out: a new cycle can open, or the open cycle
+        // still has capacity left.
+        uint256 cap = vault.capacityPerCycle();
+        bool cycleReady = block.timestamp >= vault.nextCycleAt()
+            || (vault.cycleOpen() && (cap == 0 || vault.fulfilledInCycle() < cap));
         uint256 outstanding = vault.totalQueued() - vault.totalProcessed();
 
         vm.startBroadcast();
+        // The wallet actually broadcasting; inside a script `msg.sender` is not this address.
+        (, address keeper,) = vm.readCallers();
         if (cycleReady && outstanding > 0) {
             uint256 done = vault.fulfillRedeem(type(uint256).max, 50);
             console.log("fulfilled shares", done);
@@ -29,15 +35,15 @@ contract Keeper is Script {
         // Keep the demo alive: when the line gets short, claim the manager's own payouts, top up with test
         // dollars, and join the back of the queue again.
         if (outstanding < vault.capacityPerCycle()) {
-            uint256 claimable = vault.maxRedeem(msg.sender);
-            if (claimable > 0) vault.redeem(claimable, msg.sender, msg.sender);
+            uint256 claimable = vault.maxRedeem(keeper);
+            if (claimable > 0) vault.redeem(claimable, keeper, keeper);
 
             TestUSD usd = TestUSD(vault.asset());
-            usd.mint(msg.sender, 1_000e18);
-            uint256 assets = usd.balanceOf(msg.sender);
+            usd.mint(keeper, 1_000e18);
+            uint256 assets = usd.balanceOf(keeper);
             usd.approve(address(vault), assets);
-            uint256 shares = vault.deposit(assets, msg.sender);
-            vault.requestRedeem(shares, msg.sender, msg.sender);
+            uint256 shares = vault.deposit(assets, keeper);
+            vault.requestRedeem(shares, keeper, keeper);
             console.log("re-queued shares", shares);
         }
         vm.stopBroadcast();
