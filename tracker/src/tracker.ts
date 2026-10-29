@@ -3,7 +3,7 @@ import { createPublicClient, http, type Address, type PublicClient } from "viem"
 import { erc7540Abi, fifoVaultAbi, lensAbi } from "./abi";
 import type { ChainDef, QueueDef } from "./deployments";
 import { RequestState, Source } from "./format";
-import { amountReaders } from "./readers";
+import { amountReaders, lidoEstimates } from "./readers";
 
 export interface TrackedRequest {
   queue: QueueDef;
@@ -18,6 +18,8 @@ export interface TrackedRequest {
   /** Pending and Claimable amounts, in the queue's unit, when they can be read. */
   pending?: bigint;
   claimable?: bigint;
+  /** The protocol's own off-chain estimate, if it publishes one. */
+  estimate?: { at: Date; reason: string };
 }
 
 export interface QueueOverview {
@@ -120,6 +122,12 @@ export async function lookup(chain: ChainDef, owner: Address): Promise<TrackedRe
       if (amounts) Object.assign(r, amounts);
     }),
   );
+
+  const lidoPending = open.filter((r) => r.queue.estimate === "lido" && r.state !== RequestState.Claimable);
+  if (lidoPending.length > 0 && chain.id === 1) {
+    const est = await lidoEstimates(lidoPending.map((r) => r.requestId)).catch(() => new Map());
+    for (const r of lidoPending) r.estimate = est.get(r.requestId);
+  }
   return open;
 }
 

@@ -3,7 +3,7 @@ import "./style.css";
 import { getAddress, isAddress, parseUnits, type Address } from "viem";
 import { normalize } from "viem/ens";
 
-import { CHAINS, LOCAL_CHAIN, type ChainDef } from "./deployments";
+import { CHAINS, FORK_CHAIN, LOCAL_CHAIN, type ChainDef } from "./deployments";
 import {
   MAX_U64,
   RequestState,
@@ -21,6 +21,17 @@ import {
 import { chainNow, clientFor, delayBounds, lookup, overview, type TrackedRequest } from "./tracker";
 
 const REFRESH_MS = 30_000;
+
+/** Lido wq-api `type` values, in plain words. */
+const ESTIMATE_REASON: Record<string, string> = {
+  buffer: "covered by Lido's ETH buffer",
+  bunker: "Lido is in bunker mode",
+  vaultsBalance: "covered by Lido's vault balances",
+  rewardsOnly: "waiting for staking rewards",
+  validatorBalances: "waiting for validator balances",
+  requestTimestampMargin: "waiting for the request to age",
+  exitValidators: "waiting for validators to exit",
+};
 const GITHUB = "https://github.com/Bytez3/erc7540-request-status";
 
 const esc = (s: string) =>
@@ -31,7 +42,13 @@ const esc = (s: string) =>
 // ------------------------------------------------------------------------------------------------
 
 const params = new URLSearchParams(location.search);
-const allChains = params.get("chain") === "local" ? [LOCAL_CHAIN, ...CHAINS] : CHAINS;
+const devChain = (() => {
+  if (params.get("chain") === "local") return LOCAL_CHAIN;
+  const lens = params.get("lens");
+  if (params.get("chain") === "fork" && lens && isAddress(lens)) return { ...FORK_CHAIN, lens: getAddress(lens) };
+  return undefined;
+})();
+const allChains = devChain ? [devChain, ...CHAINS] : CHAINS;
 let chain: ChainDef =
   allChains.find((c) => c.key === params.get("chain")) ?? allChains.find((c) => c.lens) ?? allChains[0];
 let owner: Address | undefined;
@@ -151,7 +168,7 @@ function card(r: TrackedRequest, now: bigint): string {
       <div class="card-head">
         <div>
           <div class="card-title">${esc(q.name)}</div>
-          <div class="card-sub">Request #${r.requestId.toString()} · ${explorer}</div>
+          <div class="card-sub">${q.discovery.kind === "zero" ? "Your position" : `Request #${r.requestId.toString()}`} · ${explorer}</div>
         </div>
         <span class="badge tone-${STATE_TONE[r.state]}">${STATE_LABEL[r.state]}</span>
       </div>
@@ -163,6 +180,7 @@ function card(r: TrackedRequest, now: bigint): string {
       <dl class="facts">
         ${showAhead ? `<div class="fact"><dt>Queue position</dt><dd>${esc(describeAhead(r.queuedAhead, q.decimals, q.unit))}</dd></div>` : ""}
         ${r.earliest > 0n && r.earliest !== r.latest && r.state !== RequestState.Claimable ? `<div class="fact"><dt>Earliest</dt><dd>${esc(formatDate(r.earliest))}</dd></div>` : ""}
+        ${r.estimate ? `<div class="fact"><dt>${esc(q.name.split(" ")[0])}'s own estimate</dt><dd>${esc(r.estimate.at.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }))} <span class="card-sub">(${esc(relative(BigInt(Math.floor(r.estimate.at.getTime() / 1000)), now))}${ESTIMATE_REASON[r.estimate.reason] ? `, ${ESTIMATE_REASON[r.estimate.reason]}` : ""})</span></dd></div>` : ""}
         ${r.latest > 0n && r.latest !== MAX_U64 && r.earliest !== r.latest && r.state !== RequestState.Claimable ? `<div class="fact"><dt>Latest</dt><dd>${esc(formatDate(r.latest))}</dd></div>` : ""}
       </dl>
       <div class="source"><b>${SOURCE_LABEL[r.source]}.</b> ${esc(SOURCE_HINT[r.source])}</div>
