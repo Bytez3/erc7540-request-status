@@ -13,6 +13,10 @@ jobs:
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
       - run: forge fmt --check
+      - name: forge lint (no findings in our code)
+        run: |
+          findings=$(forge lint 2>&1 | grep -E '^(warning|note|error)\[' || true)
+          if [ -n "$findings" ]; then forge lint; exit 1; fi
       - run: forge build --sizes
       - run: forge test -vv
 
@@ -27,4 +31,20 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install slither-analyzer
-      - run: slither src/FifoRedeemVault.sol --filter-paths "lib/|test/" --exclude-informational --fail-low
+      - run: slither src --filter-paths "lib/|test/|script/" --exclude-informational --fail-low
+
+  tracker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tracker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tracker/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

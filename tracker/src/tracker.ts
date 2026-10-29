@@ -1,0 +1,155 @@
+import { createPublicClient, http, type Address, type PublicClient } from "viem";
+
+import { erc7540Abi, fifoVaultAbi, lensAbi } from "./abi";
+import type { ChainDef, QueueDef } from "./deployments";
+import { RequestState, Source } from "./format";
+import { amountReaders } from "./readers";
+
+export interface TrackedRequest {
+  queue: QueueDef;
+  requestId: bigint;
+  controller: Address;
+  source: Source;
+  ok: boolean;
+  state: RequestState;
+  queuedAhead: bigint;
+  earliest: bigint;
+  latest: bigint;
+  /** Pending and Claimable amounts, in the queue's unit, when they can be read. */
+  pending?: bigint;
+  claimable?: bigint;
+}
+
+export interface QueueOverview {
+  outstanding: bigint;
+  cycleLength: bigint;
+  nextCycleAt: bigint;
+  capacity: bigint;
+  suspended: boolean;
+  impaired: boolean;
+}
+
+const LOG_CHUNK = 45_000n; // stays under common public-RPC eth_getLogs range limits
+const BATCH = 40;
+
+export function clientFor(chain: ChainDef): PublicClient {
+  return createPublicClient({
+    chain: {
+      id: chain.id,
+      name: chain.name,
+      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+      rpcUrls: { default: { http: [chain.rpcUrl] } },
+    },
+    transport: http(chain.rpcUrl, { retryCount: 2, timeout: 20_000 }),
+  });
+}
+
+async function discover(client: PublicClient, chain: ChainDef, q: QueueDef, owner: Address): Promise<bigint[]> {
+  switch (q.discovery.kind) {
+    case "zero":
+      return [0n];
+    case "lens":
+      return [
+        ...(await client.readContract({
+          address: chain.lens!,
+          abi: lensAbi,
+          functionName: "requestIdsOf",
+          args: [q.address, owner],
+        })),
+      ];
+    case "events": {
+      const latest = await client.getBlockNumber();
+      const ids = new Set<bigint>();
+      for (let from = q.discovery.fromBlock; from <= latest; from += LOG_CHUNK) {
+        const to = from + LOG_CHUNK - 1n > latest ? latest : from + LOG_CHUNK - 1n;
+        const logs = await client.getContractEvents({
+          address: q.address,
+          abi: erc7540Abi,
+          eventName: "RedeemRequest",
+          args: { controller: owner },
+          fromBlock: from,
+          toBlock: to,
+        });
+        for (const l of logs) if (l.args.requestId !== undefined) ids.add(l.args.requestId);
+      }
+      return [...ids].sort((a, b) => (a < b ? -1 : 1));
+    }
+  }
+}
+
+/** Every open request `owner` has across the chain's tracked queues, with ERC-XXXX status. */
+export async function lookup(chain: ChainDef, owner: Address): Promise<TrackedRequest[]> {
+  if (!chain.lens) return [];
+  const client = clientFor(chain);
+
+  const perQueue = await Promise.all(
+    chain.queues.map(async (q) => ({ q, ids: await discover(client, chain, q, owner).catch(() => [] as bigint[]) })),
+  );
+  const queries = perQueue.flatMap(({ q, ids }) => ids.map((requestId) => ({ q, requestId })));
+  if (queries.length === 0) return [];
+
+  const results: TrackedRequest[] = [];
+  for (let i = 0; i < queries.length; i += BATCH) {
+    const slice = queries.slice(i, i + BATCH);
+    const statuses = await client.readContract({
+      address: chain.lens,
+      abi: lensAbi,
+      functionName: "redeemRequestStatusBatch",
+      args: [slice.map(({ q, requestId }) => ({ vault: q.address, requestId, controller: owner }))],
+    });
+    statuses.forEach((s, j) => {
+      results.push({
+        queue: slice[j].q,
+        requestId: slice[j].requestId,
+        controller: owner,
+        source: s.source as Source,
+        ok: s.ok,
+        state: s.state as RequestState,
+        queuedAhead: s.queuedAhead,
+        earliest: s.earliestClaimableAt,
+        latest: s.latestClaimableAt,
+      });
+    });
+  }
+
+  const open = results.filter((r) => r.ok && r.state !== RequestState.None);
+  await Promise.all(
+    open.map(async (r) => {
+      const read = amountReaders[r.queue.amounts ?? "erc7540"];
+      const amounts = await read(client, r.queue.address, r.requestId, owner).catch(() => undefined);
+      if (amounts) Object.assign(r, amounts);
+    }),
+  );
+  return open;
+}
+
+export async function overview(chain: ChainDef, q: QueueDef): Promise<QueueOverview> {
+  const client = clientFor(chain);
+  const c = { address: q.address, abi: fifoVaultAbi } as const;
+  const [queued, processed, cycleLength, nextCycleAt, capacity, suspended, impaired] = await Promise.all([
+    client.readContract({ ...c, functionName: "totalQueued" }),
+    client.readContract({ ...c, functionName: "totalProcessed" }),
+    client.readContract({ ...c, functionName: "cycleLength" }),
+    client.readContract({ ...c, functionName: "nextCycleAt" }),
+    client.readContract({ ...c, functionName: "capacityPerCycle" }),
+    client.readContract({ ...c, functionName: "suspended" }),
+    client.readContract({ ...c, functionName: "impaired" }),
+  ]);
+  return { outstanding: queued - processed, cycleLength, nextCycleAt, capacity, suspended, impaired };
+}
+
+export async function delayBounds(chain: ChainDef, q: QueueDef, amount: bigint): Promise<[bigint, bigint]> {
+  const client = clientFor(chain);
+  const [min, max] = await client.readContract({
+    address: q.address,
+    abi: fifoVaultAbi,
+    functionName: "redeemDelayBounds",
+    args: [amount],
+  });
+  return [min, max];
+}
+
+export async function chainNow(chain: ChainDef): Promise<bigint> {
+  const block = await clientFor(chain).getBlock();
+  return block.timestamp;
+}
