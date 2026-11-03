@@ -1,6 +1,6 @@
-// Security / correctness audit proofs for the tracker. Each `T-n` in a test name is a finding ID.
-// No production source is modified: main.ts is driven through a minimal fake DOM with ./tracker mocked, and
-// tracker.ts is exercised for real against an in-process JSON-RPC server on 127.0.0.1.
+// Regression tests for the tracker audit. Each `T-n` in a test name is a finding ID; every test asserts the fixed
+// behaviour. main.ts is driven through a minimal fake DOM with ./tracker mocked, and tracker.ts is exercised for
+// real against an in-process JSON-RPC server on 127.0.0.1.
 // node:http is loaded dynamically below: the project has no @types/node and `npm run build` type-checks src/.
 
 import {
@@ -12,7 +12,8 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mainnet } from "viem/chains";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { erc7540Abi, lensAbi } from "./abi";
 import type { ChainDef, QueueDef } from "./deployments";
@@ -25,12 +26,16 @@ import type { TrackedRequest } from "./tracker";
 // Mock of ./tracker used when main.ts is imported (tracker.ts itself is loaded with importActual below).
 // ------------------------------------------------------------------------------------------------
 const ctl = vi.hoisted(() => ({
-  lookup: undefined as unknown as (chain: unknown, owner: string) => Promise<unknown[]>,
+  // Tests may return a bare request list (no failed queues) or a full LookupResult.
+  lookup: undefined as unknown as (chain: unknown, owner: string) => Promise<unknown>,
   getEnsAddress: async (_: unknown) => null as string | null,
 }));
 vi.mock("./tracker", () => ({
   clientFor: () => ({ getEnsAddress: (a: unknown) => ctl.getEnsAddress(a) }),
-  lookup: (c: unknown, o: string) => ctl.lookup(c, o),
+  lookup: async (c: unknown, o: string) => {
+    const r = await ctl.lookup(c, o);
+    return Array.isArray(r) ? { requests: r, failed: [] } : r;
+  },
   chainNow: async () => 1_800_000_000n,
   overview: async () => {
     throw new Error("no overview in tests");
@@ -127,10 +132,35 @@ const req = (over: Partial<TrackedRequest> = {}): TrackedRequest => ({
 });
 
 // ================================================================================================
-// T-1  Dev-only chain / RPC overrides are live in the production build
+// T-1  Dev-only chain / RPC overrides were live in the production build (fixed: gated on import.meta.env.DEV)
 // ================================================================================================
-describe("T-1 dev overrides reachable from production URL", () => {
-  it("T-1 ?chain=local activates the Local Anvil chain and auto-tracks ?address= against 127.0.0.1", async () => {
+describe("T-1 dev overrides are dev-server only", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("T-1 in a production build ?chain=local is ignored and nothing is sent to 127.0.0.1", async () => {
+    vi.stubEnv("DEV", false);
+    const seen: string[] = [];
+    ctl.lookup = async (c) => {
+      seen.push((c as ChainDef).rpcUrl);
+      return [];
+    };
+    const ui = await loadMain(`?chain=local&address=${A}`);
+    expect(seen.some((u) => u.includes("127.0.0.1") || u.includes("localhost"))).toBe(false);
+    expect(ui.results.innerHTML).not.toContain("Local Anvil");
+  });
+
+  it("T-1 in a production build ?chain=fork&rpc= is ignored too", async () => {
+    vi.stubEnv("DEV", false);
+    const seen: string[] = [];
+    ctl.lookup = async (c) => {
+      seen.push((c as ChainDef).rpcUrl);
+      return [];
+    };
+    await loadMain(`?chain=fork&lens=0x5FbDB2315678afecb367f032d93F642f64180aa3&rpc=http://localhost:22&address=${A}`);
+    expect(seen).toEqual([]);
+  });
+
+  it("T-1 (dev server) ?chain=local still activates the Local Anvil chain for development", async () => {
     const seen: string[] = [];
     ctl.lookup = async (c) => {
       seen.push((c as ChainDef).rpcUrl);
@@ -172,20 +202,27 @@ describe("T-1 dev overrides reachable from production URL", () => {
     expect(new URL("http://localhost:8545/").hostname).toBe("localhost");
   });
 
-  it("T-1b crafted ?from= throws during module init and leaves the page blank", async () => {
+  it("T-1b a malformed ?from= falls back to block 0 instead of crashing the page", async () => {
     const lens = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
     const vault = "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9";
-    await expect(loadMain(`?chain=fork&lens=${lens}&vault=${vault}&from=abc`)).rejects.toThrow(/BigInt/);
+    let fromBlock: bigint | undefined;
+    ctl.lookup = async (c) => {
+      const d = (c as ChainDef).queues[0].discovery;
+      fromBlock = d.kind === "events" ? d.fromBlock : undefined;
+      return [];
+    };
+    await loadMain(`?chain=fork&lens=${lens}&vault=${vault}&from=abc&address=${A}`);
+    expect(fromBlock).toBe(0n);
   });
 });
 
 // ================================================================================================
-// T-2  Stale results from a previous lookup render under the new address
+// T-2  Stale results from a previous lookup rendered under the new address (fixed: lookup generations)
 // ================================================================================================
 describe("T-2 refresh race", () => {
   beforeEach(() => vi.unstubAllGlobals());
 
-  it("T-2 an in-flight auto-refresh for wallet A renders A's requests under wallet B's header", async () => {
+  it("T-2 an in-flight auto-refresh for wallet A is discarded once wallet B is looked up", async () => {
     const pendingA = deferred<TrackedRequest[]>();
     let callsA = 0;
     ctl.lookup = async (_c, o) => {
@@ -204,12 +241,12 @@ describe("T-2 refresh race", () => {
     pendingA.resolve([req({ requestId: 111n, controller: A })]); // A's slow refresh lands
     await flush();
     const html = ui.results.innerHTML;
-    expect(html).toContain("0x2222…2222"); // header says wallet B
-    expect(html).toContain("Request #111"); // ...but the body is wallet A's request
-    expect(html).not.toContain("Request #222");
+    expect(html).toContain("0x2222…2222");
+    expect(html).toContain("Request #222");
+    expect(html).not.toContain("Request #111");
   });
 
-  it("T-2 the same happens via the demo button while a typed lookup is still loading", async () => {
+  it("T-2 the demo button during a slow typed lookup wins, and the late answer is discarded", async () => {
     const pendingA = deferred<TrackedRequest[]>();
     ctl.lookup = async (_c, o) => (o === A ? pendingA.promise : [req({ requestId: 222n, controller: B })]);
     const ui = await loadMain("?chain=local");
@@ -222,75 +259,95 @@ describe("T-2 refresh race", () => {
     pendingA.resolve([req({ requestId: 111n })]);
     await flush();
     expect(ui.results.innerHTML).toContain("0xf39F…2266");
-    expect(ui.results.innerHTML).toContain("Request #111");
+    expect(ui.results.innerHTML).toContain("Request #222");
+    expect(ui.results.innerHTML).not.toContain("Request #111");
   });
 });
 
 // ================================================================================================
-// T-3  One malformed record (bad Lido date, unknown enum) blanks the whole results list
+// T-3  One malformed record (bad Lido date, unknown enum) blanked the whole results list (fixed)
 // ================================================================================================
 describe("T-3 render robustness", () => {
   beforeEach(() => vi.unstubAllGlobals());
 
-  it("T-3 lidoEstimates turns a non-date finalizationAt into an Invalid Date (no validation)", async () => {
+  it("T-3 lidoEstimates drops entries whose finalizationAt or requestId don't parse", async () => {
     vi.stubGlobal("fetch", async () => ({
       ok: true,
-      json: async () => [{ status: "calculated", requestInfo: { requestId: "5", finalizationAt: "soon", type: "buffer" } }],
+      json: async () => [
+        { status: "calculated", requestInfo: { requestId: "5", finalizationAt: "soon", type: "buffer" } },
+        { status: "calculated", requestInfo: { requestId: "x6", finalizationAt: "2027-01-01T00:00:00Z" } },
+        { status: "calculated", requestInfo: { requestId: "7", finalizationAt: "2027-01-01T00:00:00Z", type: "buffer" } },
+      ],
     }));
-    const m = await lidoEstimates([5n]);
-    expect(Number.isNaN(m.get(5n)!.at.getTime())).toBe(true);
+    const m = await lidoEstimates([5n, 7n]);
+    expect([...m.keys()]).toEqual([7n]);
     vi.unstubAllGlobals();
   });
 
-  it("T-3 ...and that Invalid Date throws in card() so every request disappears behind a 'Couldn't reach' error", async () => {
+  it("T-3 an Invalid Date estimate is skipped and every request still renders", async () => {
     ctl.lookup = async () => [
       req({ requestId: 1n }),
       req({ requestId: 2n, estimate: { at: new Date("soon"), reason: "buffer" } }),
     ];
     const ui = await loadMain("?chain=local");
     await submit(ui, A);
-    expect(ui.results.innerHTML).toContain("Couldn't reach Local Anvil");
-    expect(ui.results.innerHTML).toContain("cannot be converted to a BigInt");
-    expect(ui.results.innerHTML).not.toContain("Request #1");
+    expect(ui.results.innerHTML).not.toContain("Couldn't reach");
+    expect(ui.results.innerHTML).toContain("Request #1");
+    expect(ui.results.innerHTML).toContain("Request #2");
   });
 
-  it("T-3 an out-of-range Source/State from the lens (uint8) throws in esc(undefined)", async () => {
+  it("T-3 an out-of-range Source from the lens (uint8) renders as 'Unknown source'", async () => {
     ctl.lookup = async () => [req({ requestId: 1n }), req({ requestId: 2n, source: 9 as Source })];
     const ui = await loadMain("?chain=local");
     await submit(ui, A);
-    expect(ui.results.innerHTML).toContain("Couldn't reach Local Anvil");
-    expect(ui.results.innerHTML).not.toContain("Request #1");
+    expect(ui.results.innerHTML).not.toContain("Couldn't reach");
+    expect(ui.results.innerHTML).toContain("Request #1");
+    expect(ui.results.innerHTML).toContain("Unknown source");
   });
 
-  it("T-3 an out-of-range State renders the literal text 'undefined' and class tone-undefined", async () => {
+  it("T-3 a card that still fails to render is replaced by a placeholder, not the whole list", async () => {
+    const bad = req({ requestId: 2n });
+    Object.defineProperty(bad, "latest", { get: () => { throw new Error("boom"); } });
+    ctl.lookup = async () => [req({ requestId: 1n }), bad];
+    const ui = await loadMain("?chain=local");
+    await submit(ui, A);
+    expect(ui.results.innerHTML).toContain("Request #1");
+    expect(ui.results.innerHTML).toContain("can't display");
+  });
+
+  it("T-3 an out-of-range State renders as 'Unknown state' with a neutral badge", async () => {
     ctl.lookup = async () => [req({ state: 9 as RequestState })];
     const ui = await loadMain("?chain=local");
     await submit(ui, A);
-    expect(ui.results.innerHTML).toContain("tone-undefined");
-    expect(ui.results.innerHTML).toMatch(/>undefined<\/span>/);
+    expect(ui.results.innerHTML).not.toContain("tone-undefined");
+    expect(ui.results.innerHTML).toContain("tone-neutral");
+    expect(ui.results.innerHTML).toContain("Unknown state");
   });
 
-  it("T-3c Lido `type` = 'constructor' is looked up on Object.prototype and rendered as native code text", async () => {
+  it("T-3c Lido `type` = 'constructor' is not looked up on Object.prototype", async () => {
     ctl.lookup = async () => [req({ estimate: { at: new Date(1_800_086_400_000), reason: "constructor" } })];
     const ui = await loadMain("?chain=local");
     await submit(ui, A);
-    expect(ui.results.innerHTML).toContain("function Object() { [native code] }");
+    expect(ui.results.innerHTML).not.toContain("native code");
+    expect(ui.results.innerHTML).toContain("Request #1");
   });
 });
 
 // ================================================================================================
-// T-4  Timestamps beyond the JS Date range render as "Invalid Date"
+// T-4  Timestamps beyond the JS Date range rendered as "Invalid Date" (fixed)
 // ================================================================================================
 describe("T-4 large timestamps", () => {
-  it("T-4 a latest bound just below the MAX_U64 sentinel renders 'By Invalid Date'", () => {
+  it("T-4 a latest bound just below the MAX_U64 sentinel is treated as no upper bound", () => {
     const w = describeWindow(RequestState.Pending, 0n, MAX_U64 - 1n, 1_800_000_000n);
-    expect(w.headline).toBe("By Invalid Date");
-    expect(formatDate(8_640_000_000_001n)).toBe("Invalid Date"); // year 275760+
+    expect(w.headline).toBe("Timing not published");
+    expect(formatDate(8_640_000_000_001n)).toBe("far in the future"); // year 275760+
+    expect(formatDate(8_640_000_000_001n)).not.toContain("Invalid");
   });
-  it("T-4 earliest > latest (inconsistent vault) is shown as a backwards window without complaint", () => {
+  it("T-4 earliest > latest (inconsistent vault) is flagged instead of drawn as a backwards window", () => {
     const fmt = (t: bigint) => `T${t}`;
     const w = describeWindow(RequestState.Pending, 2_000_000_000n, 1_900_000_000n, 1_800_000_000n, fmt);
-    expect(w.headline).toBe("Between T2000000000 and T1900000000");
+    expect(w.headline).toBe("Timing inconsistent");
+    expect(w.unknown).toBe(true);
   });
 });
 
@@ -451,7 +508,7 @@ describe("T-5 / T-6 / T-7 log discovery", () => {
     getLogsCalls.length = 0;
   });
 
-  it("T-5 an eth_getLogs failure is reported to the user as 'no open withdrawals' (lookup resolves [])", async () => {
+  it("T-5 an eth_getLogs failure is reported as a failed queue, not as 'no open withdrawals'", async () => {
     const { lookup } = await actualTracker();
     handler = rpc(
       () => 100n,
@@ -459,10 +516,20 @@ describe("T-5 / T-6 / T-7 log discovery", () => {
         throw new Error("query returned more than 10000 results");
       },
     );
-    await expect(lookup(testChain("t5"), OWNER)).resolves.toEqual([]);
+    const r = await lookup(testChain("t5"), OWNER);
+    expect(r.requests).toEqual([]);
+    expect(r.failed.map((q) => q.id)).toEqual(["demo"]);
   });
 
-  it("T-6 a chunk failing after earlier chunks found the request drops that request from the result", async () => {
+  it("T-5 main.ts tells the user a queue couldn't be checked", async () => {
+    ctl.lookup = async () => ({ requests: [], failed: [DEMO_Q] });
+    const ui = await loadMain("?chain=local");
+    await submit(ui, A);
+    expect(ui.results.innerHTML).toContain("Couldn't check every queue");
+    expect(ui.results.innerHTML).not.toContain("No open withdrawals found<");
+  });
+
+  it("T-6 a chunk failing after earlier chunks keeps the requests already found", async () => {
     const { lookup } = await actualTracker();
     handler = rpc(
       () => 50_000n,
@@ -473,10 +540,11 @@ describe("T-5 / T-6 / T-7 log discovery", () => {
     );
     const r = await lookup(testChain("t6"), OWNER);
     expect(getLogsCalls[0]).toEqual({ fromBlock: 0n, toBlock: 44_999n });
-    expect(r).toEqual([]); // request 7 was found in chunk 1 but is not shown
+    expect(r.requests.map((x) => x.requestId)).toEqual([7n]);
+    expect(r.failed.map((q) => q.id)).toEqual(["demo"]);
   });
 
-  it("T-7 a lagging/load-balanced RPC node makes a request invisible for the whole session", async () => {
+  it("T-7 a log missed by a lagging/load-balanced RPC node is picked up on the next refresh", async () => {
     const { lookup } = await actualTracker();
     let head = 100n;
     let nodeHasBlock99 = false; // backend that served eth_getLogs was 2 blocks behind the one that served eth_blockNumber
@@ -485,18 +553,15 @@ describe("T-5 / T-6 / T-7 log discovery", () => {
       (from, to) => (nodeHasBlock99 && from <= 99n && 99n <= to ? [redeemLog(42n, 99n)] : []),
     );
     const chain = testChain("t7");
-    expect(await lookup(chain, OWNER)).toEqual([]);
+    expect((await lookup(chain, OWNER)).requests).toEqual([]);
     expect(getLogsCalls.at(-1)).toEqual({ fromBlock: 0n, toBlock: 100n });
 
     nodeHasBlock99 = true; // the log at block 99 is now available everywhere
     head = 101n;
     await new Promise((r) => setTimeout(r, 4_100)); // viem caches eth_blockNumber for pollingInterval (4 s)
     const second = await lookup(chain, OWNER);
-    expect(getLogsCalls.at(-1)).toEqual({ fromBlock: 101n, toBlock: 101n }); // block 99 is never re-scanned
-    expect(second).toEqual([]); // request 42 is missed until the page is reloaded
-
-    const fresh = await lookup(testChain("t7-reload"), OWNER); // a reload (fresh cache) finds it
-    expect(fresh.map((x) => x.requestId)).toEqual([42n]);
+    expect(getLogsCalls.at(-1)).toEqual({ fromBlock: 37n, toBlock: 101n }); // the last 64 blocks are re-scanned
+    expect(second.requests.map((x) => x.requestId)).toEqual([42n]);
   }, 15_000);
 
   it("T-7 (negative result) fromBlock 0n is handled: the first scan starts at block 0", async () => {
@@ -504,21 +569,30 @@ describe("T-5 / T-6 / T-7 log discovery", () => {
     handler = rpc(() => 5n, () => [redeemLog(1n, 0n)]);
     const r = await lookup(testChain("t7-zero"), OWNER);
     expect(getLogsCalls[0]).toEqual({ fromBlock: 0n, toBlock: 5n });
-    expect(r.map((x) => x.requestId)).toEqual([1n]);
+    expect(r.requests.map((x) => x.requestId)).toEqual([1n]);
   });
 });
 
 // ================================================================================================
-// T-8  ENS lookups can never succeed: the client's chain object has no ensUniversalResolver
+// T-8  ENS lookups could never succeed: the client's chain object had no ensUniversalResolver (fixed)
 // ================================================================================================
 describe("T-8 ENS", () => {
-  it("T-8 getEnsAddress on the mainnet client throws before sending any request", async () => {
+  it("T-8 getEnsAddress on a chain-id-1 client queries the ENS Universal Resolver", async () => {
     const { clientFor } = await actualTracker();
-    const { CHAINS } = await import("./deployments");
-    const mainnet = CHAINS.find((c) => c.id === 1)!;
     const { normalize } = await import("viem/ens");
-    await expect(clientFor(mainnet).getEnsAddress({ name: normalize("vitalik.eth") })).rejects.toThrow(
+    const calledTo: string[] = [];
+    handler = (method, params) => {
+      if (method === "eth_chainId") return "0x1";
+      if (method === "eth_call") {
+        calledTo.push(getAddress((params[0] as { to: Address }).to));
+        throw new Error("execution reverted");
+      }
+      throw new Error(`unhandled ${method}`);
+    };
+    const chain = { ...testChain("t8"), id: 1 };
+    await expect(clientFor(chain).getEnsAddress({ name: normalize("vitalik.eth") })).rejects.not.toThrow(
       /does not support contract "ensUniversalResolver"/,
     );
+    expect(calledTo).toContain(getAddress(mainnet.contracts.ensUniversalResolver.address));
   });
 });

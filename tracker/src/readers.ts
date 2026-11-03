@@ -82,10 +82,13 @@ export async function lidoEstimates(ids: bigint[]): Promise<Map<bigint, { at: Da
     requestInfo: { requestId: string; finalizationAt?: string; type?: string };
     status: string;
   }[];
-  for (const r of body) {
-    if (r.status === "calculated" && r.requestInfo.finalizationAt) {
-      out.set(BigInt(r.requestInfo.requestId), { at: new Date(r.requestInfo.finalizationAt), reason: r.requestInfo.type ?? "" });
-    }
+  // Third-party data: skip any entry that doesn't parse rather than let it break the page.
+  for (const r of Array.isArray(body) ? body : []) {
+    if (r?.status !== "calculated" || typeof r.requestInfo?.finalizationAt !== "string") continue;
+    const id = String(r.requestInfo.requestId ?? "");
+    const at = new Date(r.requestInfo.finalizationAt);
+    if (!/^\d+$/.test(id) || Number.isNaN(at.getTime())) continue;
+    out.set(BigInt(id), { at, reason: typeof r.requestInfo.type === "string" ? r.requestInfo.type : "" });
   }
   return out;
 }

@@ -78,12 +78,17 @@ export function formatAmount(value: bigint, decimals: number, maxFrac = 2): stri
   return `${wholeStr}.${fracStr}`;
 }
 
+/** Latest unix second a JS `Date` can represent (year 275760). Later bounds are treated as "no bound". */
+export const MAX_DATE_S = 8_640_000_000_000n;
+const CENTURY_S = 100 * 365 * 86400;
+
 /** Human duration from `now` to `t` (both unix seconds): "in 3 d 4 h", "in 45 min", "now", "2 h ago". */
 export function relative(t: bigint, now: bigint): string {
   const diff = Number(t - now);
   const past = diff < 0;
   const s = Math.abs(diff);
   if (s < 60) return "now";
+  if (s > CENTURY_S) return past ? "over 100 years ago" : "in over 100 years";
   const d = Math.floor(s / 86400);
   const h = Math.floor((s % 86400) / 3600);
   const m = Math.floor((s % 3600) / 60);
@@ -92,6 +97,7 @@ export function relative(t: bigint, now: bigint): string {
 }
 
 export function formatDate(t: bigint, locale?: string, timeZone?: string): string {
+  if (t > MAX_DATE_S) return "far in the future";
   return new Date(Number(t) * 1000).toLocaleString(locale, {
     weekday: "short",
     day: "numeric",
@@ -126,7 +132,8 @@ export function describeWindow(
   }
 
   const noEarliest = earliest === 0n || earliest <= now;
-  const noLatest = latest === MAX_U64;
+  // A latest bound no Date can show (only the sentinel or a vault bug) carries no information.
+  const noLatest = latest === MAX_U64 || latest > MAX_DATE_S;
 
   if (noEarliest && noLatest) {
     return { headline: "Timing not published", detail: "This vault does not say when requests are processed", unknown: true };
@@ -137,6 +144,10 @@ export function describeWindow(
   if (noEarliest) {
     if (latest <= now) return { headline: "Due now", detail: "Could be processed at any moment", unknown: false };
     return { headline: `By ${fmt(latest)}`, detail: `could be any moment, ${relative(latest, now)} at the latest`, unknown: false };
+  }
+  if (earliest > latest) {
+    // The standard forbids this; say so rather than draw a backwards window.
+    return { headline: "Timing inconsistent", detail: "The vault reported an earliest time after its latest time", unknown: true };
   }
   if (earliest === latest) {
     return { headline: `Expected ${fmt(latest)}`, detail: relative(latest, now), unknown: false };

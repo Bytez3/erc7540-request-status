@@ -1,4 +1,5 @@
 import { createPublicClient, http, type Address, type PublicClient } from "viem";
+import { mainnet } from "viem/chains";
 
 import { erc7540Abi, fifoVaultAbi, lensAbi } from "./abi";
 import type { ChainDef, QueueDef } from "./deployments";
@@ -22,6 +23,12 @@ export interface TrackedRequest {
   estimate?: { at: Date; reason: string };
 }
 
+export interface LookupResult {
+  requests: TrackedRequest[];
+  /** Queues that could not be fully checked. Their requests may be missing from `requests`. */
+  failed: QueueDef[];
+}
+
 export interface QueueOverview {
   outstanding: bigint;
   cycleLength: bigint;
@@ -32,6 +39,9 @@ export interface QueueOverview {
 }
 
 const LOG_CHUNK = 45_000n; // stays under common public-RPC eth_getLogs range limits
+// Every refresh re-scans this many recent blocks. Load-balanced public RPCs can answer eth_getLogs from a
+// node a few blocks behind the one that answered eth_blockNumber; without the overlap those logs are lost.
+const RESCAN_BLOCKS = 64n;
 const BATCH = 40;
 
 // One client per chain, so JSON-RPC batching and the log cache are shared across refreshes.
@@ -47,6 +57,8 @@ export function clientFor(chain: ChainDef): PublicClient {
       name: chain.name,
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
       rpcUrls: { default: { http: [chain.rpcUrl] } },
+      // Mainnet (and a local mainnet fork) needs the ENS Universal Resolver for name lookups.
+      contracts: chain.id === mainnet.id ? mainnet.contracts : undefined,
     },
     // Concurrent reads are sent as one JSON-RPC batch request instead of one HTTP request each.
     transport: http(chain.rpcUrl, { retryCount: 2, timeout: 20_000, batch: { batchSize: 50, wait: 16 } }),
@@ -58,54 +70,73 @@ export function clientFor(chain: ChainDef): PublicClient {
 /** Request ids already found per (queue, controller), and the last block scanned for them. */
 const logCache = new Map<string, { ids: Set<bigint>; scannedTo: bigint }>();
 
-async function discover(client: PublicClient, chain: ChainDef, q: QueueDef, owner: Address): Promise<bigint[]> {
+/** Request ids for `owner` at `q`. `error` is set when the scan could not finish; `ids` then holds what was found. */
+async function discover(
+  client: PublicClient,
+  chain: ChainDef,
+  q: QueueDef,
+  owner: Address,
+): Promise<{ ids: bigint[]; error?: unknown }> {
   switch (q.discovery.kind) {
     case "zero":
-      return [0n];
+      return { ids: [0n] };
     case "lens":
-      return [
-        ...(await client.readContract({
-          address: chain.lens!,
-          abi: lensAbi,
-          functionName: "requestIdsOf",
-          args: [q.address, owner],
-        })),
-      ];
+      return {
+        ids: [
+          ...(await client.readContract({
+            address: chain.lens!,
+            abi: lensAbi,
+            functionName: "requestIdsOf",
+            args: [q.address, owner],
+          })),
+        ],
+      };
     case "events": {
-      // Scan only blocks not seen before for this queue and wallet; refreshes then cost one small log query.
+      // Scan only blocks not seen before (plus a small overlap) for this queue and wallet; refreshes then cost one
+      // small log query. Progress is cached chunk by chunk, so a failed chunk is retried on the next refresh.
       const cacheKey = `${chain.key}|${q.address}|${owner}`;
-      const cached = logCache.get(cacheKey) ?? { ids: new Set<bigint>(), scannedTo: q.discovery.fromBlock - 1n };
-      const latest = await client.getBlockNumber();
-      const ids = cached.ids;
-      for (let from = cached.scannedTo + 1n; from <= latest; from += LOG_CHUNK) {
-        const to = from + LOG_CHUNK - 1n > latest ? latest : from + LOG_CHUNK - 1n;
-        const logs = await client.getContractEvents({
-          address: q.address,
-          abi: erc7540Abi,
-          eventName: "RedeemRequest",
-          args: { controller: owner },
-          fromBlock: from,
-          toBlock: to,
-        });
-        for (const l of logs) if (l.args.requestId !== undefined) ids.add(l.args.requestId);
-        cached.scannedTo = to;
-      }
+      const start = q.discovery.fromBlock;
+      const cached = logCache.get(cacheKey) ?? { ids: new Set<bigint>(), scannedTo: start - 1n };
       logCache.set(cacheKey, cached);
-      return [...ids].sort((a, b) => (a < b ? -1 : 1));
+      const sorted = () => [...cached.ids].sort((a, b) => (a < b ? -1 : 1));
+      try {
+        const latest = await client.getBlockNumber();
+        const resume = cached.scannedTo + 1n - RESCAN_BLOCKS;
+        for (let from = resume > start ? resume : start; from <= latest; from += LOG_CHUNK) {
+          const to = from + LOG_CHUNK - 1n > latest ? latest : from + LOG_CHUNK - 1n;
+          const logs = await client.getContractEvents({
+            address: q.address,
+            abi: erc7540Abi,
+            eventName: "RedeemRequest",
+            args: { controller: owner },
+            fromBlock: from,
+            toBlock: to,
+          });
+          for (const l of logs) if (l.args.requestId !== undefined) cached.ids.add(l.args.requestId);
+          if (to > cached.scannedTo) cached.scannedTo = to;
+        }
+      } catch (error) {
+        return { ids: sorted(), error };
+      }
+      return { ids: sorted() };
     }
   }
 }
 
 /** Every open request `owner` has across the chain's tracked queues, with ERC-XXXX status. */
-export async function lookup(chain: ChainDef, owner: Address): Promise<TrackedRequest[]> {
-  if (!chain.lens) return [];
+export async function lookup(chain: ChainDef, owner: Address): Promise<LookupResult> {
+  if (!chain.lens) return { requests: [], failed: [] };
   const client = clientFor(chain);
 
   const perQueue = await Promise.all(
-    chain.queues.map(async (q) => ({ q, ids: await discover(client, chain, q, owner).catch(() => [] as bigint[]) })),
+    chain.queues.map(async (q) => ({
+      q,
+      ...(await discover(client, chain, q, owner).catch((error: unknown) => ({ ids: [] as bigint[], error }))),
+    })),
   );
+  const failed = perQueue.filter((p) => p.error !== undefined).map((p) => p.q);
   const queries = perQueue.flatMap(({ q, ids }) => ids.map((requestId) => ({ q, requestId })));
-  if (queries.length === 0) return [];
+  if (queries.length === 0) return { requests: [], failed };
 
   const results: TrackedRequest[] = [];
   for (let i = 0; i < queries.length; i += BATCH) {
@@ -145,7 +176,7 @@ export async function lookup(chain: ChainDef, owner: Address): Promise<TrackedRe
     const est = await lidoEstimates(lidoPending.map((r) => r.requestId)).catch(() => new Map());
     for (const r of lidoPending) r.estimate = est.get(r.requestId);
   }
-  return open;
+  return { requests: open, failed };
 }
 
 export async function overview(chain: ChainDef, q: QueueDef): Promise<QueueOverview> {

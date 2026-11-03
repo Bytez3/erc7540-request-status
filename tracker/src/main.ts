@@ -3,7 +3,7 @@ import "./style.css";
 import { getAddress, isAddress, parseUnits, type Address } from "viem";
 import { normalize } from "viem/ens";
 
-import { CHAINS, FORK_CHAIN, LOCAL_CHAIN, type ChainDef } from "./deployments";
+import { CHAINS, FORK_CHAIN, LOCAL_CHAIN, type ChainDef, type QueueDef } from "./deployments";
 import {
   MAX_U64,
   RequestState,
@@ -42,8 +42,10 @@ const esc = (s: string) =>
 // ------------------------------------------------------------------------------------------------
 
 const params = new URLSearchParams(location.search);
-// Development only: point the tracker at a local chain or fork. Remote RPCs are never accepted here.
+// Development only: point the tracker at a local chain or fork. Remote RPCs are never accepted here, and the
+// production build drops this block entirely, so a crafted link can't aim visitors at their own localhost.
 const devChain = (() => {
+  if (!import.meta.env.DEV) return undefined;
   if (params.get("chain") === "local") return LOCAL_CHAIN;
   const lens = params.get("lens");
   if (params.get("chain") !== "fork" || !lens || !isAddress(lens)) return undefined;
@@ -66,7 +68,7 @@ const devChain = (() => {
           address: getAddress(vault),
           unit: "b3tUSD shares",
           decimals: 18,
-          discovery: { kind: "events" as const, fromBlock: BigInt(params.get("from") ?? "0") },
+          discovery: { kind: "events" as const, fromBlock: /^\d+$/.test(params.get("from") ?? "") ? BigInt(params.get("from")!) : 0n },
           overview: true,
           blurb: "Rehearsal of the Sepolia demo on a local fork.",
         },
@@ -80,6 +82,9 @@ let chain: ChainDef =
   allChains.find((c) => c.key === params.get("chain")) ?? allChains.find((c) => c.lens) ?? allChains[0];
 let owner: Address | undefined;
 let timer: number | undefined;
+// Bumped by every new lookup or chain switch. A response is rendered only if its generation is still current, so a
+// slow answer for an earlier wallet can never paint over a later one.
+let generation = 0;
 
 // ------------------------------------------------------------------------------------------------
 // Shell
@@ -197,7 +202,7 @@ function card(r: TrackedRequest, now: bigint): string {
           <div class="card-title">${esc(q.name)}</div>
           <div class="card-sub">${q.discovery.kind === "zero" ? "Your position" : `Request #${r.requestId.toString()}`} · ${explorer}</div>
         </div>
-        <span class="badge tone-${STATE_TONE[r.state]}">${STATE_LABEL[r.state]}</span>
+        <span class="badge tone-${STATE_TONE[r.state] ?? "neutral"}">${esc(STATE_LABEL[r.state] ?? "Unknown state")}</span>
       </div>
       <div class="when${w.unknown ? " unknown" : ""}">
         <div class="when-headline">${esc(w.headline)}</div>
@@ -207,25 +212,35 @@ function card(r: TrackedRequest, now: bigint): string {
       <dl class="facts">
         ${showAhead ? `<div class="fact"><dt>Queue position</dt><dd>${esc(describeAhead(r.queuedAhead, q.decimals, q.unit))}</dd></div>` : ""}
         ${r.earliest > 0n && r.earliest !== r.latest && r.state !== RequestState.Claimable ? `<div class="fact"><dt>Earliest</dt><dd>${esc(formatDate(r.earliest))}</dd></div>` : ""}
-        ${r.estimate ? `<div class="fact"><dt>${esc(q.name.split(" ")[0])}'s own estimate</dt><dd>${esc(r.estimate.at.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }))} <span class="card-sub">(${esc(relative(BigInt(Math.floor(r.estimate.at.getTime() / 1000)), now))}${ESTIMATE_REASON[r.estimate.reason] ? `, ${ESTIMATE_REASON[r.estimate.reason]}` : ""})</span></dd></div>` : ""}
+        ${r.estimate && !Number.isNaN(r.estimate.at.getTime()) ? `<div class="fact"><dt>${esc(q.name.split(" ")[0])}'s own estimate</dt><dd>${esc(r.estimate.at.toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }))} <span class="card-sub">(${esc(relative(BigInt(Math.floor(r.estimate.at.getTime() / 1000)), now))}${Object.hasOwn(ESTIMATE_REASON, r.estimate.reason) ? `, ${ESTIMATE_REASON[r.estimate.reason]}` : ""})</span></dd></div>` : ""}
         ${r.latest > 0n && r.latest !== MAX_U64 && r.earliest !== r.latest && r.state !== RequestState.Claimable ? `<div class="fact"><dt>Latest</dt><dd>${esc(formatDate(r.latest))}</dd></div>` : ""}
       </dl>
-      <div class="source"><b>${SOURCE_LABEL[r.source]}.</b> ${esc(SOURCE_HINT[r.source])}</div>
+      <div class="source"><b>${esc(SOURCE_LABEL[r.source] ?? "Unknown source")}.</b> ${esc(SOURCE_HINT[r.source] ?? "")}</div>
     </article>`;
 }
 
-function renderResults(list: TrackedRequest[], now: bigint) {
-  if (!owner) {
-    results.innerHTML = "";
-    return;
+/** One card; a record that can't be rendered gets a small placeholder instead of taking the whole list down. */
+function safeCard(r: TrackedRequest, now: bigint): string {
+  try {
+    return card(r, now);
+  } catch {
+    return `<article class="card"><div class="card-title">${esc(r.queue.name)}</div>
+      <div class="card-sub">This request returned data the tracker can't display.</div></article>`;
   }
-  const head = `<div class="updated">${shortAddress(owner)} on ${esc(chain.name)} · updated ${new Date().toLocaleTimeString()}</div>`;
+}
+
+function renderResults(c: ChainDef, who: Address, list: TrackedRequest[], failed: QueueDef[], now: bigint) {
+  const head = `<div class="updated">${shortAddress(who)} on ${esc(c.name)} · updated ${new Date().toLocaleTimeString()}</div>`;
+  const names = failed.map((q) => esc(q.name)).join(", ");
   if (list.length === 0) {
-    results.innerHTML = `${head}<div class="notice"><strong>No open withdrawals found</strong>This wallet has nothing waiting in the queues we track on ${esc(chain.name)}.</div>`;
+    results.innerHTML = failed.length
+      ? `${head}<div class="notice"><strong>Couldn't check every queue</strong>No open withdrawals found, but ${names} could not be read right now. Try again in a moment.</div>`
+      : `${head}<div class="notice"><strong>No open withdrawals found</strong>This wallet has nothing waiting in the queues we track on ${esc(c.name)}.</div>`;
     return;
   }
+  const warn = failed.length ? `<div class="notice"><strong>Some queues couldn't be read</strong>${names} may have more requests than shown here.</div>` : "";
   const order = (r: TrackedRequest) => (r.state === RequestState.Claimable ? 0 : r.state === RequestState.PartiallyClaimable ? 1 : 2);
-  results.innerHTML = head + [...list].sort((a, b) => order(a) - order(b)).map((r) => card(r, now)).join("");
+  results.innerHTML = head + warn + [...list].sort((a, b) => order(a) - order(b)).map((r) => safeCard(r, now)).join("");
 }
 
 async function renderQueues() {
@@ -287,35 +302,43 @@ async function resolveOwner(raw: string): Promise<Address> {
   throw new Error("That doesn't look like a wallet address");
 }
 
-async function refresh() {
-  if (!owner || !chain.lens) return;
+async function refresh(gen = generation) {
+  const c = chain;
+  const who = owner;
+  if (!who || !c.lens) return;
   try {
-    const [list, now] = await Promise.all([lookup(chain, owner), chainNow(chain)]);
-    renderResults(list, now);
+    const [{ requests, failed }, now] = await Promise.all([lookup(c, who), chainNow(c)]);
+    if (gen === generation) renderResults(c, who, requests, failed, now);
   } catch (e) {
-    results.innerHTML = `<div class="notice"><strong>Couldn't reach ${esc(chain.name)}</strong>${esc((e as Error).message.split("\n")[0])}</div>`;
+    if (gen !== generation) return;
+    results.innerHTML = `<div class="notice"><strong>Couldn't reach ${esc(c.name)}</strong>${esc(String((e as Error)?.message ?? e).split("\n")[0])}</div>`;
   }
 }
 
 async function track(raw: string) {
   if (!chain.lens) return;
+  const gen = ++generation;
+  clearInterval(timer);
   button.disabled = true;
   results.innerHTML = `<div class="skeleton"></div>`;
   try {
-    owner = await resolveOwner(raw);
+    const resolved = await resolveOwner(raw);
+    if (gen !== generation) return;
+    owner = resolved;
     input.value = raw.trim();
     const url = new URL(location.href);
     url.searchParams.set("chain", chain.key);
     url.searchParams.set("address", owner);
     history.replaceState(null, "", url);
-    await refresh();
-    clearInterval(timer);
+    await refresh(gen);
+    if (gen !== generation) return;
     timer = window.setInterval(() => void refresh(), REFRESH_MS);
   } catch (e) {
+    if (gen !== generation) return;
     owner = undefined;
     results.innerHTML = `<div class="notice"><strong>${esc((e as Error).message)}</strong>Paste a 0x… address${chain.id === 1 ? " or an ENS name" : ""}.</div>`;
   } finally {
-    button.disabled = false;
+    if (gen === generation) button.disabled = false;
   }
 }
 
@@ -324,7 +347,9 @@ function switchChain(key: string) {
   if (!next || next.key === chain.key) return;
   chain = next;
   owner = undefined;
+  generation++;
   clearInterval(timer);
+  button.disabled = false;
   results.innerHTML = "";
   const url = new URL(location.href);
   url.searchParams.set("chain", chain.key);

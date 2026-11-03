@@ -108,3 +108,6 @@ cd tracker && npm run dev            # open http://localhost:5174/?chain=local
 
 To browse real mainnet queues against a fork, deploy the lens to the fork as in step 6 and open
 `http://localhost:5174/?chain=fork&lens=<fork lens address>`.
+
+The `?chain=local` and `?chain=fork` options exist only under `npm run dev`. The production build (`npm run build`,
+`npm run preview`, the hosted site) strips them, so a link can never point visitors' browsers at their own localhost.
