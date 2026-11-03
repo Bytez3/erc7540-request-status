@@ -293,7 +293,9 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
     /// Unknown values degrade to the loosest true bound (0 / type(uint64).max).
     function _estimate(uint256 ahead, uint256 pending) internal view returns (uint64 earliest, uint64 latest) {
         if (suspended || cycleLength == 0) return (0, type(uint64).max);
-        latest = capacityPerCycle == 0 ? type(uint64).max : _toU64(_fillTime(ahead + pending - 1));
+        // Saturate rather than overflow: the views MUST NOT revert, whatever amount a caller asks about.
+        uint256 last = pending - 1 > type(uint256).max - ahead ? type(uint256).max : ahead + pending - 1;
+        latest = capacityPerCycle == 0 ? type(uint64).max : _toU64(_fillTime(last));
         earliest = _toU64(_fillTime(ahead));
     }
 
@@ -310,9 +312,12 @@ contract FifoRedeemVault is ERC4626, Ownable, IERC7540Redeem, IERC7540RedeemStat
         uint256 nextOpen = canOpenNow ? block.timestamp + cycleLength : nextCycleAt;
         if (capacityPerCycle == 0) return nextOpen;
         // Rounding down to a whole cycle is intended.
+        uint256 cycles = (x - availableNow) / capacityPerCycle;
+        // Past the uint64 range the time is unknowable anyway; return the sentinel instead of overflowing.
+        if (cycles > type(uint64).max / cycleLength) return type(uint64).max;
         // slither-disable-start divide-before-multiply
         // forge-lint: disable-next-line(divide-before-multiply)
-        return nextOpen + ((x - availableNow) / capacityPerCycle) * cycleLength;
+        return nextOpen + cycles * cycleLength;
         // slither-disable-end divide-before-multiply
     }
 

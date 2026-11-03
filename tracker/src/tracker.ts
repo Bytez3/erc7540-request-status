@@ -138,9 +138,21 @@ export async function lookup(chain: ChainDef, owner: Address): Promise<LookupRes
   const queries = perQueue.flatMap(({ q, ids }) => ids.map((requestId) => ({ q, requestId })));
   if (queries.length === 0) return { requests: [], failed };
 
+  // Split into lens calls, each no bigger than the smallest `statusBatch` of the queues in it.
+  const limit = (x: (typeof queries)[number]) => x.q.statusBatch ?? BATCH;
+  const slices: (typeof queries)[] = [];
+  let cur: typeof queries = [];
+  for (const x of queries) {
+    if (cur.length > 0 && cur.length + 1 > Math.min(limit(x), ...cur.map(limit))) {
+      slices.push(cur);
+      cur = [];
+    }
+    cur.push(x);
+  }
+  if (cur.length > 0) slices.push(cur);
+
   const results: TrackedRequest[] = [];
-  for (let i = 0; i < queries.length; i += BATCH) {
-    const slice = queries.slice(i, i + BATCH);
+  for (const slice of slices) {
     const statuses = await client.readContract({
       address: chain.lens,
       abi: lensAbi,

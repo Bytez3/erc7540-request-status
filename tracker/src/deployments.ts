@@ -31,6 +31,8 @@ export interface QueueDef {
   estimate?: "lido";
   /** Set for vaults that implement ERC-XXXX natively and expose the reference-vault overview views. */
   overview?: boolean;
+  /** Max status queries per lens call for this queue, when one query can cost a lot of gas. Defaults to 40. */
+  statusBatch?: number;
   blurb: string;
 }
 
@@ -58,6 +60,9 @@ export const MAINNET_QUEUES: QueueDef[] = [
     discovery: { kind: "lens" },
     amounts: "lido",
     estimate: "lido",
+    // The Lido adapter reads up to 1,000 queue entries per request (~12M gas), so keep each eth_call under the
+    // ~50M gas cap public RPCs apply.
+    statusBatch: 3,
     blurb: "Unstaking stETH back to ETH. Paid out at Lido's daily oracle report once enough ETH is available.",
   },
   {

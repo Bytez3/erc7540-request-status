@@ -411,6 +411,7 @@ let server: NodeAny;
 let port = 0;
 let handler: Handler = () => null;
 const getLogsCalls: { fromBlock: bigint; toBlock: bigint }[] = [];
+const lensBatchSizes: number[] = [];
 
 beforeAll(async () => {
   const nodeHttp = "node:http";
@@ -487,6 +488,7 @@ function rpc(head: () => bigint, logs: (from: bigint, to: bigint) => unknown[]):
         const d = decodeFunctionData({ abi: lensAbi, data });
         if (d.functionName === "redeemRequestStatusBatch") {
           const qs = d.args[0] as readonly { requestId: bigint }[];
+          lensBatchSizes.push(qs.length);
           return encodeFunctionResult({
             abi: lensAbi,
             functionName: "redeemRequestStatusBatch",
@@ -563,6 +565,17 @@ describe("T-5 / T-6 / T-7 log discovery", () => {
     expect(getLogsCalls.at(-1)).toEqual({ fromBlock: 37n, toBlock: 101n }); // the last 64 blocks are re-scanned
     expect(second.requests.map((x) => x.requestId)).toEqual([42n]);
   }, 15_000);
+
+  it("A-2 expensive queues are split into small lens calls (Lido: up to ~12M gas per query)", async () => {
+    const { lookup } = await actualTracker();
+    lensBatchSizes.length = 0;
+    handler = rpc(() => 10n, () => [1n, 2n, 3n, 4n, 5n, 6n, 7n].map((id) => redeemLog(id, 1n)));
+    const base = testChain("a2");
+    const chain = { ...base, queues: [{ ...base.queues[0], statusBatch: 3 }] };
+    const r = await lookup(chain, OWNER);
+    expect(r.requests).toHaveLength(7);
+    expect(lensBatchSizes).toEqual([3, 3, 1]);
+  });
 
   it("T-7 (negative result) fromBlock 0n is handled: the first scan starts at block 0", async () => {
     const { lookup } = await actualTracker();
