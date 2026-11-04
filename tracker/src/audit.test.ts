@@ -157,7 +157,8 @@ describe("T-1 dev overrides are dev-server only", () => {
       return [];
     };
     await loadMain(`?chain=fork&lens=0x5FbDB2315678afecb367f032d93F642f64180aa3&rpc=http://localhost:22&address=${A}`);
-    expect(seen).toEqual([]);
+    // A normal lookup on a deployed public chain is fine; nothing may go to a loopback address.
+    expect(seen.some((u) => u.includes("127.0.0.1") || u.includes("localhost"))).toBe(false);
   });
 
   it("T-1 (dev server) ?chain=local still activates the Local Anvil chain for development", async () => {

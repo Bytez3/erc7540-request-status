@@ -37,12 +37,18 @@ add `--password-file` so nothing has to be typed. Otherwise drop that flag and F
 ```bash
 export SEPOLIA_RPC=https://ethereum-sepolia-rpc.publicnode.com
 export PW=~/.foundry/keystores/bytez3-deployer.password
-forge script script/DeployLens.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --password-file $PW --broadcast --verify --verifier sourcify
-forge script script/DeployDemo.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --password-file $PW --broadcast --verify --verifier sourcify
+forge script script/DeployLens.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --password-file $PW --broadcast --gas-estimate-multiplier 700 --verify --verifier sourcify
+forge script script/DeployDemo.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --password-file $PW --broadcast --gas-estimate-multiplier 700 --verify --verifier sourcify
 ```
 
-Both scripts check after deploying that your wallet owns what they deployed, and abort otherwise. A rehearsal of
-these exact commands on a Sepolia fork (2026-10-29) cost about 0.0004 ETH in total.
+Both scripts check after deploying that your wallet owns what they deployed, and abort otherwise.
+
+`--gas-estimate-multiplier 700` is required on Sepolia as of November 2026. Sepolia now charges about 1,400 gas per
+byte of contract code (roughly 7x the old price), but Foundry 1.5.1 still estimates gas with the old rules, so without
+the flag every deploy runs out of gas. A local fork rehearsal does not catch this, because the fork uses Foundry's
+rules too. The flag only raises the gas limit; you pay for gas actually used, which was well under 0.000001 ETH.
+A single transaction is also capped at 16,777,216 gas, which is why `foundry.toml` enables the optimizer: the
+unoptimized vault would need about 28M gas and cannot be deployed at all.
 
 `--verifier sourcify` publishes the verified source code without needing an API key. To verify on Etherscan
 instead, create a free key at etherscan.io and use `--verify --etherscan-api-key <key>`.
@@ -63,7 +69,7 @@ The demo vault pays out once an hour, but only when someone calls the manager fu
 you want the queue to advance:
 
 ```bash
-DEMO_VAULT=<FifoRedeemVault address> forge script script/Keeper.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --broadcast
+DEMO_VAULT=<FifoRedeemVault address> forge script script/Keeper.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --password-file $PW --broadcast --gas-estimate-multiplier 700
 ```
 
 The keeper refuses to run on Ethereum mainnet or Base.

@@ -1,1 +1,8 @@
-{}
+{
+  "sepolia": {
+    "lens": "0x2cD12AA3b6dD4eD6A8D26FF84D20A8E6c1A9EaB7",
+    "demoVault": "0x598BAB196c1C7B664BA96aF738C456EAB08cE639",
+    "demoVaultBlock": 12061700,
+    "demoManager": "0x6a34C9143fCE3cBDaE22701e97ebD1B184231Dd2"
+  }
+}

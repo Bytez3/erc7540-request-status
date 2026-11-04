@@ -2,6 +2,7 @@
 // never copied by hand. Run from the repo root after a deploy:  node tracker/scripts/sync-deployments.mjs
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { getAddress } from "viem";
 
 const root = resolve(import.meta.dirname, "../..");
 const out = resolve(root, "tracker/src/deployments.generated.json");
@@ -30,7 +31,8 @@ const created = (run, name) => {
   const tx = run?.transactions.find((t) => t.transactionType === "CREATE" && t.contractName === name);
   if (!tx) return undefined;
   const receipt = run.receipts.find((r) => r.transactionHash === tx.hash);
-  return { address: tx.contractAddress, block: receipt ? Number(BigInt(receipt.blockNumber)) : 0 };
+  // Foundry records addresses in lowercase; the tracker requires EIP-55 checksums.
+  return { address: getAddress(tx.contractAddress), block: receipt ? Number(BigInt(receipt.blockNumber)) : 0 };
 };
 
 const result = {};
@@ -50,7 +52,7 @@ for (const [chainId, { key, rpc }] of Object.entries(CHAINS)) {
     lens: lens?.address,
     demoVault: vault?.address,
     demoVaultBlock: vault?.block,
-    demoManager: demoRun?.transactions[0]?.transaction?.from,
+    demoManager: demoRun?.transactions[0]?.transaction?.from && getAddress(demoRun.transactions[0].transaction.from),
   };
 }
 writeFileSync(out, JSON.stringify(result, null, 2) + "\n");
