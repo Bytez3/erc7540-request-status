@@ -1,4 +1,4 @@
-import { createPublicClient, http, type Address, type PublicClient } from "viem";
+import { createPublicClient, fallback, http, type Address, type PublicClient } from "viem";
 import { mainnet } from "viem/chains";
 
 import { erc7540Abi, fifoVaultAbi, lensAbi } from "./abi";
@@ -38,11 +38,17 @@ export interface QueueOverview {
   impaired: boolean;
 }
 
-const LOG_CHUNK = 45_000n; // stays under common public-RPC eth_getLogs range limits
+const LOG_CHUNK = 25_000n; // stays under public-RPC eth_getLogs range limits (ethpandaops allows 30,000)
 // Every refresh re-scans this many recent blocks. Load-balanced public RPCs can answer eth_getLogs from a
 // node a few blocks behind the one that answered eth_blockNumber; without the overlap those logs are lost.
 const RESCAN_BLOCKS = 64n;
 const BATCH = 40;
+
+// Concurrent reads are combined into JSON-RPC batches, except on gateways that price a batch as one request:
+// Tenderly's public gateway answers HTTP 429 to as few as two eth_getLogs or ten eth_calls in one batch, but
+// accepts the same calls sent in parallel.
+const RPC_BATCH = { batchSize: 50, wait: 16 };
+const NO_BATCH_HOSTS = ["gateway.tenderly.co"];
 
 // One client per chain, so JSON-RPC batching and the log cache are shared across refreshes.
 const clients = new Map<string, PublicClient>();
@@ -60,8 +66,11 @@ export function clientFor(chain: ChainDef): PublicClient {
       // Mainnet (and a local mainnet fork) needs the ENS Universal Resolver for name lookups.
       contracts: chain.id === mainnet.id ? mainnet.contracts : undefined,
     },
-    // Concurrent reads are sent as one JSON-RPC batch request instead of one HTTP request each.
-    transport: http(chain.rpcUrl, { retryCount: 2, timeout: 20_000, batch: { batchSize: 50, wait: 16 } }),
+    transport: fallback(
+      [chain.rpcUrl, ...(chain.fallbackRpcUrls ?? [])].map((url) =>
+        http(url, { retryCount: 2, timeout: 20_000, batch: NO_BATCH_HOSTS.some((h) => url.includes(h)) ? false : RPC_BATCH }),
+      ),
+    ),
   });
   clients.set(key, client);
   return client;

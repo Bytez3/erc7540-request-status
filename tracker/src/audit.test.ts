@@ -537,12 +537,12 @@ describe("T-5 / T-6 / T-7 log discovery", () => {
     handler = rpc(
       () => 50_000n,
       (from) => {
-        if (from >= 45_000n) throw new Error("rate limited");
+        if (from >= 25_000n) throw new Error("rate limited");
         return [redeemLog(7n, 10n)];
       },
     );
     const r = await lookup(testChain("t6"), OWNER);
-    expect(getLogsCalls[0]).toEqual({ fromBlock: 0n, toBlock: 44_999n });
+    expect(getLogsCalls[0]).toEqual({ fromBlock: 0n, toBlock: 24_999n });
     expect(r.requests.map((x) => x.requestId)).toEqual([7n]);
     expect(r.failed.map((q) => q.id)).toEqual(["demo"]);
   });

@@ -43,6 +43,8 @@ export interface ChainDef {
   key: string;
   name: string;
   rpcUrl: string;
+  /** Tried in order if `rpcUrl` fails. */
+  fallbackRpcUrls?: string[];
   explorer: string;
   testnet: boolean;
   lens?: Address;
@@ -112,7 +114,11 @@ export const CHAINS: ChainDef[] = [
     id: 11155111,
     key: "sepolia",
     name: "Sepolia testnet",
-    rpcUrl: "https://ethereum-sepolia-rpc.publicnode.com",
+    // The demo vault's requests are found by scanning its event logs, so the RPC must keep full log history.
+    // ethpandaops (EF-run) does, allows browser requests and large batches. Tenderly also has full history but
+    // rate-limits batches. publicnode prunes logs older than a few weeks (history expiry), so it comes last.
+    rpcUrl: "https://rpc.sepolia.ethpandaops.io",
+    fallbackRpcUrls: ["https://sepolia.gateway.tenderly.co", "https://ethereum-sepolia-rpc.publicnode.com"],
     explorer: "https://sepolia.etherscan.io",
     testnet: true,
     lens: gen.sepolia?.lens,
