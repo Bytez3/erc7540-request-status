@@ -8,6 +8,8 @@ interface Generated {
   demoVault?: Address;
   demoVaultBlock?: number;
   demoManager?: Address;
+  /** Wallet of the hourly GitHub Actions keeper (script/setup-keeper.sh); it keeps re-joining the demo queue. */
+  demoKeeper?: Address;
 }
 const gen = generated as Record<string, Generated>;
 
@@ -128,7 +130,7 @@ export const CHAINS: ChainDef[] = [
           },
         ]
       : [],
-    demoWallets: gen.sepolia?.demoManager ? [gen.sepolia.demoManager] : undefined,
+    demoWallets: [gen.sepolia?.demoKeeper, gen.sepolia?.demoManager].filter((a): a is Address => !!a),
   },
   {
     id: 1,

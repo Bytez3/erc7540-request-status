@@ -35,6 +35,8 @@ const created = (run, name) => {
   return { address: getAddress(tx.contractAddress), block: receipt ? Number(BigInt(receipt.blockNumber)) : 0 };
 };
 
+// Fields written by other scripts (e.g. demoKeeper from script/setup-keeper.sh) are kept.
+const previous = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : {};
 const result = {};
 for (const [chainId, { key, rpc }] of Object.entries(CHAINS)) {
   const lensRun = read("DeployLens.s.sol", chainId);
@@ -49,6 +51,7 @@ for (const [chainId, { key, rpc }] of Object.entries(CHAINS)) {
     }
   }
   result[key] = {
+    ...previous[key],
     lens: lens?.address,
     demoVault: vault?.address,
     demoVaultBlock: vault?.block,

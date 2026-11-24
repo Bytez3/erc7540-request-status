@@ -65,8 +65,20 @@ into the config. Commit the generated file.
 
 ## 5. Keep the demo queue moving (testnet)
 
-The demo vault pays out once an hour, but only when someone calls the manager function. Run the keeper whenever
-you want the queue to advance:
+The demo vault pays out once an hour, but only when someone calls the manager function. The GitHub Actions workflow
+`.github/workflows/keeper.yml` does this every hour. Set it up once from the repo root:
+
+```bash
+bash script/setup-keeper.sh
+```
+
+The script creates a separate keeper wallet and stores its key directly as the encrypted repo secret
+`KEEPER_PRIVATE_KEY`, without printing it. It then funds the keeper with 0.05 Sepolia ETH and hands it ownership of
+the demo vault only; the lens stays with the deployer. Commit the updated `tracker/src/deployments.generated.json`
+so the tracker's demo button shows the keeper's live requests. GitHub pauses scheduled workflows after 60 days
+without repository activity; re-enable it on the Actions tab if that happens.
+
+To run the keeper by hand instead, as the vault owner:
 
 ```bash
 DEMO_VAULT=<FifoRedeemVault address> forge script script/Keeper.s.sol --rpc-url $SEPOLIA_RPC --account bytez3-deployer --password-file $PW --broadcast --gas-estimate-multiplier 700
@@ -96,6 +108,10 @@ node tracker/scripts/sync-deployments.mjs
 Measured cost on a mainnet fork (2026-10-29): about 4.9M gas, or roughly 0.001 ETH at 0.2 gwei.
 
 ## 7. Host the tracker
+
+`.github/workflows/pages.yml` builds the tracker and publishes it to GitHub Pages whenever `tracker/` changes on
+main: https://bytez3.github.io/erc7540-request-status/. To use your own domain, add it under Settings → Pages.
+To host it elsewhere instead:
 
 ```bash
 cd tracker && npm ci && npm run build

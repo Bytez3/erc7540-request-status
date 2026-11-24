@@ -1,0 +1,36 @@
+name: keeper
+
+# Advances the Sepolia demo queue once an hour by running script/Keeper.s.sol as the demo vault's owner.
+# One-time setup: bash script/setup-keeper.sh (creates the KEEPER_PRIVATE_KEY secret and the DEMO_VAULT variable).
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keeper
+  cancel-in-progress: false
+
+jobs:
+  keeper:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.5.1
+      - name: Run keeper
+        env:
+          KEEPER_PRIVATE_KEY: ${{ secrets.KEEPER_PRIVATE_KEY }}
+          DEMO_VAULT: ${{ vars.DEMO_VAULT }}
+          SEPOLIA_RPC: https://ethereum-sepolia-rpc.publicnode.com
+        run: |
+          if [ -z "$KEEPER_PRIVATE_KEY" ] || [ -z "$DEMO_VAULT" ]; then
+            echo "Keeper not set up yet (run script/setup-keeper.sh). Skipping."
+            exit 0
+          fi
+          # Sepolia's code-size gas pricing is above what Foundry 1.5.1 estimates; see docs/DEPLOY.md.
+          forge script script/Keeper.s.sol --rpc-url "$SEPOLIA_RPC" --private-key "$KEEPER_PRIVATE_KEY" \
+            --broadcast --gas-estimate-multiplier 700

@@ -4,6 +4,8 @@
 
 Proposed by **[Bytez3](https://www.bytez3.com)** (Steven Isaac, [@SteOnChain](https://github.com/SteOnChain)).
 
+**Live demo: [Bytez3 Queue Tracker](https://bytez3.github.io/erc7540-request-status/)** (Sepolia testnet).
+
 A draft ERC plus a reference implementation. It lets any ERC-7540 async vault report a Request's **state**, **queue position**, and **bounds on when it becomes claimable**.
 
 | Path | What |
@@ -19,6 +21,8 @@ A draft ERC plus a reference implementation. It lets any ERC-7540 async vault re
 | `tracker/` | **Bytez3 Queue Tracker**: a static web app that answers "when do I get my money?" for a wallet. |
 | `script/` | `DeployLens`, `DeployDemo` (testnet demo vault), `Keeper` (advances the demo queue). |
 | `docs/DEPLOY.md` | Step-by-step deploy runbook. |
+| `.github/workflows/pages.yml` | Publishes the tracker to GitHub Pages on every change. |
+| `.github/workflows/keeper.yml` | Advances the Sepolia demo queue every hour (one-time setup: `script/setup-keeper.sh`). |
 | `docs/research/queue-interfaces.md` | Verified interfaces and addresses of the live queues the adapters read. |
 | `MAGICIANS_POST.md` | Draft discussion post for ethereum-magicians.org. |
 

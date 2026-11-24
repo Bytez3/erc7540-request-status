@@ -22,6 +22,8 @@ Every RWA fund, credit vault, and LST/LRT withdrawal queue exposes this differen
 
 This was raised in the ERC-7540 thread back in 2023. @Amxx asked for "a standard discovery mechanism" for async delays. @joeysantoro said he'd be open to it if it were "either optional or includes a magic value for 'unknown delay'". The 7540 Rationale also notes that "not all Vaults will be able to return a reliable timestamp". This proposal tries to address both points.
 
+The gap is still open. The current ERC-8416 draft (Epoch-Based Fixed-Rate Vault, [PR #2009](https://github.com/ethereum/ERCs/pull/2009)) extends 7540 and states in its Rationale that fulfillment timing is "left to the implementation".
+
 ### Proposal
 
 Two ERC-165-detectable interfaces, one for redemptions and one for deposits, following the split used by ERC-7887 and ERC-8161:
@@ -50,7 +52,23 @@ Other points:
 - It adds view functions and an event only, with no changes to request, fulfillment or claim behavior.
 
 **Draft spec:** https://github.com/Bytez3/erc7540-request-status/blob/main/ERCS/erc-xxxx.md
-**Reference implementation:** a FIFO redemption-queue vault where every status view is O(1) gas, using cumulative queue counters with no iteration. It *enforces* its schedule, so its `earliestClaimableAt` is a guarantee rather than an estimate. It has 45 unit/fuzz tests and 8 stateful invariants, including "no share is ever paid before the earliest time the vault reported", and Slither reports no findings. https://github.com/Bytez3/erc7540-request-status
+**Reference implementation:** a FIFO redemption-queue vault where every status view is O(1) gas, using cumulative queue counters with no iteration. It *enforces* its schedule, so its `earliestClaimableAt` is a guarantee rather than an estimate. The repo has 95 tests: unit, fuzz, 8 stateful invariants (including "no share is ever paid before the earliest time the vault reported") and daily tests against live mainnet contracts. Slither reports no findings. https://github.com/Bytez3/erc7540-request-status
+
+### Try it
+
+- **Live demo:** https://bytez3.github.io/erc7540-request-status/ (click "Try a demo wallet"). The tracker reads everything from the chain, with no backend.
+- **On Sepolia**, all verified on Sourcify:
+  - reference vault `0x598BAB196c1C7B664BA96aF738C456EAB08cE639`, paying out hourly
+  - `RequestStatusLens` `0x2cD12AA3b6dD4eD6A8D26FF84D20A8E6c1A9EaB7`, one read-only entry point that answers natively, through an adapter, or through a generic ERC-7540 fallback
+- **Queues that predate the standard:** adapters for Lido's stETH withdrawal queue and Ethena's sUSDe cooldown show that the interface fits real queues as they exist today. For Lido, the adapter's on-chain earliest bound is derived from the oracle frame schedule. On a mainnet fork it landed just before Lido's own off-chain estimate, which is what a sound lower bound should do.
+
+### Related work
+
+- **Receipt NFTs for async 4626 vaults** ([thread](https://ethereum-magicians.org/t/erc-tokenizing-withdrawal-claims-for-async-4626-vaults/28529)): optional `claimableAfter(tokenId)`/`claimableBefore(tokenId)` give one exact timestamp per receipt NFT. This proposal keys on 7540's own `(requestId, controller)` and returns a sound earliest/latest *pair* plus state and queue position. The two compose: a receipt could expose these values for its underlying request.
+- **ERC-8416** (PR #2009): vault-level epoch `exitWindow`, which is a schedule, not per-request status.
+- **ERC-8318** (fund metadata, PR #1845) and **ERC-8391** (asset status, PR #1964): fund- and asset-level lifecycle state. This proposal is request-level.
+- **ERC-8161** (transferable requests): complementary. Status is derived from the 7540 `pending*`/`claimable*` values for `(requestId, controller)`, so it follows a request to its new controller after a transfer.
+- **ERC-7887** (cancelation): complementary, but the interaction is not specified yet (see open question 5).
 
 ### Open questions
 
@@ -58,7 +76,8 @@ Other points:
 2. **Should `Impaired` carry a magnitude**, such as an expected recovery ratio in basis points, or is a state flag enough for a first version?
 3. **`requestId == 0` vaults:** is it acceptable to report the controller's aggregate Pending amount as a single position, or do people want per-deposit granularity?
 4. **Naming:** `RequestStatus` vs. `RequestSchedule` vs. `QueueInfo`?
-5. **Would vault teams implement this?** I'd especially value input from Centrifuge, LST/LRT withdrawal queues, and tokenized-fund issuers. I'm looking for co-authors.
+5. **Cancelation (ERC-7887):** while a cancel is pending, should the Request report its normal state, or should there be a distinct state? A new state would need its own interface ID, since the enum is fixed at six values.
+6. **Would vault teams implement this?** I'd especially value input from Centrifuge, LST/LRT withdrawal queues, and tokenized-fund issuers. I'm looking for co-authors.
 
 Thanks!
 
